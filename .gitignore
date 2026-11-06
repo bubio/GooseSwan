@@ -1,0 +1,10 @@
+# Goose build output
+.goose/
+*.o
+/gooseswan
+/sst
+
+# Test data (large corpora and ROMs are fetched, not committed)
+tests/data/
+*.ws
+*.wsc
