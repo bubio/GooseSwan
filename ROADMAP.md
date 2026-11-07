@@ -29,22 +29,32 @@ and the next step recorded in the session notes.
   multiply/divide flag models, the stale multiply/divide-unit CF/OF)
   are catalogued in docs/sessions/2026-11-07-wscputest.md.
 
-## M2 — Bus and cartridge (in progress)
+## M2 — Bus and cartridge ✅ (2026-11-07)
 - Memory map, I/O-port bank switching, SRAM/EEPROM.
 - Done when: test ROMs boot and run to their result screens.
-- Status 2026-11-07: the groundwork was pulled forward into the M1
-  session — memory map with bank/linear windows, the port registers
-  WSCpuTest needs, and a headless ROM runner that boots cartridges and
-  reads results off the BG map. Remaining: fuller I/O coverage, EEPROM.
+- Result 2026-11-07: exceeded — **WSHWTest Test All passes** (interrupt
+  manager, HBL/VBL timers, the full SPHINX I/O-register mask model in
+  mono and colour modes, noise LFSR). The linear window is decoded
+  top-aligned so odd-sized images (WSHWTest's 768 KB) boot. Cartridge /
+  internal EEPROM remains unimplemented — no current test asset covers
+  it. See docs/sessions/2026-11-07-timing-foundation.md.
 
-## M3 — PPU
+## M3 — PPU (in progress)
 - 224x144 rendering (mono + color modes, sprites, windows).
 - Harness: run N frames, dump framebuffer, compare by hash.
 - Done when: WSHWTest's display/timing checks pass.
+- Status 2026-11-07: the timing foundation landed first — a cycle
+  estimator drives the scanline model (159 lines × 256 cycles), the
+  current-line port and the frame loop. WSTimingTest page 1 passes
+  16/17 (the miss is the prefetch-alignment "Unaligned" case).
+  Rendering itself has not started.
 
-## M4 — Peripherals
+## M4 — Peripherals (in progress)
 - APU, timers, interrupts, DMA.
 - Done when: real game ROMs run with sound.
+- Status 2026-11-07: timers, the interrupt controller semantics and
+  the APU noise LFSR were pulled forward and are WSHWTest-verified.
+  Remaining: wave channels / sweep / volume (audible APU), DMA.
 
 ## M5 — Frontend
 - Goose gfx package (SDL3): window, input, audio out.

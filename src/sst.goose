@@ -29,9 +29,20 @@ var bk_rom1: i64 = 0xFF;   // port C3
 var bk_linear: i64 = 0;    // port C0
 var io_ports: u8[256] = [0; 256];
 var int_cause: i64 = 0;
+var sys_ctrl1: i64 = 0x02;  // SYSTEM_CTRL1: bits 0,1,7 are sticky identity bits (bit1 = colour-capable), bits 2,3 writable
+var lfsr: i64 = 0;          // APU noise LFSR (15-bit, XNOR feedback), read back through ports 92/93
+var noise_acc: i64 = 0;     // cycles accumulated towards the next LFSR step
+var last_tick: i64 = 0;     // ws_cycles value at the previous ws_line_events call
 var key_select: i64 = 0;
 var keys_state: i64 = 0;   // Y1-4 bits 0-3, X1-4 bits 4-7, Start bit 9, A bit 10, B bit 11
 var cpu_halted: bool = false;
+var ws_cycles: i64 = 0;     // total CPU cycles since reset (WS mode): drives the scanline model
+var last_line: i64 = 0;     // scanline the model has advanced to (0..158)
+var cyc_tab: i64[256] = [0; 256];  // first-pass per-opcode cycle estimates for the WS timing model
+var io_wmask_m: i64[256] = [0; 256];   // SPHINX mono-mode port write masks (WSHWTest ioRegMasksSPHINXMono)
+var io_always_m: i64[256] = [0; 256];  // SPHINX mono-mode port always-set read bits
+var io_wmask_c: i64[256] = [0; 256];   // SPHINX colour-mode port write masks (WSHWTest ioRegMasksSPHINX)
+var io_always_c: i64[256] = [0; 256];  // SPHINX colour-mode port always-set read bits
 
 fn rd8(p: i64) -> u8 {
     if !ws_mode { return mem[p]; }
@@ -40,11 +51,21 @@ fn rd8(p: i64) -> u8 {
     if rom.len == 0 { return 0xFF; }
     if p < 0x30000 { return rom[(((bk_rom0 << 16) | (p & 0xFFFF)) % rom.len) as i64]; }
     if p < 0x40000 { return rom[(((bk_rom1 << 16) | (p & 0xFFFF)) % rom.len) as i64]; }
-    return rom[(((bk_linear << 20) | (p & 0xFFFFF)) % rom.len) as i64];
+    // The linear window is top-aligned: at reset the ROM's last bytes (the
+    // footer with the entry jump) sit at the top of the address space. For
+    // power-of-two sizes up to 1 MB this equals the plain modulo decode;
+    // WSHWTest's 768 KB image (address space 0x40000-0xFFFFF) needs the shift.
+    return rom[(((bk_linear << 20) + (p & 0xFFFFF) + rom.len - 0x100000) % rom.len) as i64];
 }
 
 fn port_rd(p: i64) -> i64 {
-    if p == 0xA0 { return 0x02; }  // SYSTEM_CTRL1: colour-capable hardware (drives the SPHINX flag variants in test ROMs)
+    if p == 0x02 { return (ws_cycles % 40704) / 256; }  // LCD_LINE: current scanline (159 lines x 256 cycles)
+    if p == 0xA0 { return sys_ctrl1; }  // SYSTEM_CTRL1 (drives the SPHINX flag variants in test ROMs)
+    if p == 0x91 { return (io_ports[0x91] as i64) & 0x0F; }  // SND_OUT_CTRL: only the low 4 bits exist (bit 7 is a status bit, unread here)
+    if p == 0x92 { return lfsr & 0xFF; }  // SND_RANDOM low
+    if p == 0x93 { return (lfsr >> 8) & 0xFF; }  // SND_RANDOM high
+    if p == 0xB0 { return (io_ports[0xB0] as i64) & 0xF8; }  // INT_VECTOR: low 3 bits do not exist
+    if p == 0xB1 { return 0; }  // SERIAL_DATA: receive buffer, empty
     if p == 0xB4 { return int_cause; }  // INT_CAUSE
     if p == 0xB5 {  // KEYPAD: selector echoed back, selected scan groups OR-ed into the low nibble
         var v: i64 = key_select;
@@ -57,16 +78,157 @@ fn port_rd(p: i64) -> i64 {
     if p == 0xC1 { return bk_ram; }
     if p == 0xC2 { return bk_rom0; }
     if p == 0xC3 { return bk_rom1; }
-    return io_ports[p] as i64;
+    if p >= 0xB8 { return io_ports[p] as i64; }
+    if ((io_ports[0x60] as i64) & 0x80) != 0 { return ((io_ports[p] as i64) & io_wmask_c[p]) | io_always_c[p]; }  // SYSTEM_CTRL2 VMODE_COLOR selects the mask set
+    return ((io_ports[p] as i64) & io_wmask_m[p]) | io_always_m[p];
+}
+fn hexval(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48; }
+    if c >= 97 && c <= 102 { return c - 87; }
+    return 0;
+}
+fn init_io_masks() {
+    for i in 256 { io_wmask_m[i] = 0xFF; io_wmask_c[i] = 0xFF; }
+    let mono = "3f000700ff00ff001f007f00ff007700ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff003f00ff00ff00ff000000ff000000ff00ff00ff00ff007700770077007700770077007700770070007700700077007000770070007700770077007700770077007700770077007000770070007700700077007000770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff000000ff000000000000000000000000000000ff006f0000000000000000000000000000000000000000000000000000000000000000000000000000000000ff000700ff000700ff000700ff000700ff00ff00ff00ff00ff001f001700ff00ef00ff00ff00ff000f00ff00ff00ff00ff00ff00ff00ff00ff00ff0003000000ff0000000f000f00ff00ff00ff00ff00ff00ff00ff00ff00ff00000000000000ff00ff00ff00c400ff00ff0000001000";
+    let colp = "3f00ff00ff00ff003f007f00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff003f00ff00ff00ff000000ff000000ff00ff00ff00ff0077007700770077007700770077007700700077007000770070007700700077007700770077007700770077007700770070007700700077007000770070007700fe00ff000f000000fe00ff00fe00ff0040000000ff00ff000f000000ff00ff000f0000005f000000000000000000000000000000000000000000000000000000ff000000ff000000000000000000000000000000ff006f0000000000000000000000000000000000000000000000000000000000000000000000000000000000ff000700ff000700ff000700ff000700ff00ff00ff00ff00ff001f001700ff00ef00ff00ff00ff000f00ff00ff00ff00ff00ff00ff00ff00ff00ff0003000000ff0000000f000f00ff00ff00ff00ff00ff00ff00ff00ff00ff00000000000000ff00ff00ff00c400ff00ff0000001000";
+    for i in 184 {
+        io_wmask_m[i] = hexval(mono[i * 4]) * 16 + hexval(mono[i * 4 + 1]);
+        io_always_m[i] = hexval(mono[i * 4 + 2]) * 16 + hexval(mono[i * 4 + 3]);
+        io_wmask_c[i] = hexval(colp[i * 4]) * 16 + hexval(colp[i * 4 + 1]);
+        io_always_c[i] = hexval(colp[i * 4 + 2]) * 16 + hexval(colp[i * 4 + 3]);
+    }
 }
 fn port_wr(p: i64, v: i64) {
+    if p >= 0xA8 && p <= 0xAB { return; }  // HBL/VBL timer counters are read-only
     io_ports[p] = v as! u8;
-    if p == 0xB5 { key_select = v; }
+    if p == 0xA4 { io_ports[0xA8] = v as! u8; }        // writing a timer period also resets its counter (per byte)
+    else if p == 0xA5 { io_ports[0xA9] = v as! u8; }
+    else if p == 0xA6 { io_ports[0xAA] = v as! u8; }
+    else if p == 0xA7 { io_ports[0xAB] = v as! u8; }
+    if p == 0x8E && (v & 0x08) != 0 { lfsr = 0; noise_acc = 0; io_ports[0x8E] = (v & 0xF7) as! u8; }  // SND_NOISE_CTRL reset: reseed LFSR, bit self-clears
+    if p == 0xA0 { sys_ctrl1 = (sys_ctrl1 & 0x87) | (v & 0x0C); }
+    else if p == 0xB5 { key_select = v & 0x70; }  // KEYPAD: only select bits 4-6 exist
     else if p == 0xB6 { int_cause = int_cause & ~v; }  // INT_CAUSE_CLEAR
     else if p == 0xC0 { bk_linear = v & 0x3F; }
     else if p == 0xC1 { bk_ram = v; }
     else if p == 0xC2 { bk_rom0 = v; }
     else if p == 0xC3 { bk_rom1 = v; }
+}
+
+fn hbl_count() -> i64 { (io_ports[0xA8] as i64) | ((io_ports[0xA9] as i64) << 8) }
+fn set_hbl_count(v: i64) { io_ports[0xA8] = (v & 0xFF) as! u8; io_ports[0xA9] = ((v >> 8) & 0xFF) as! u8; }
+fn vbl_count() -> i64 { (io_ports[0xAA] as i64) | ((io_ports[0xAB] as i64) << 8) }
+fn set_vbl_count(v: i64) { io_ports[0xAA] = (v & 0xFF) as! u8; io_ports[0xAB] = ((v >> 8) & 0xFF) as! u8; }
+fn tick_hbl() {
+    let cnt: i64 = hbl_count();
+    if cnt == 0 { return; }
+    let ctrl: i64 = io_ports[0xA2] as i64;
+    let irqen: bool = ((io_ports[0xB2] as i64) & 0x80) != 0;
+    if (ctrl & 1) == 0 && !(cnt == 1 && irqen) { return; }  // disabled, except the counter=1 latch quirk (Swanium)
+    if cnt == 1 {
+        if irqen { int_cause |= 0x80; }
+        if (ctrl & 2) != 0 { set_hbl_count((io_ports[0xA4] as i64) | ((io_ports[0xA5] as i64) << 8)); } else { set_hbl_count(0); }
+    } else { set_hbl_count(cnt - 1); }
+}
+fn tick_vbl() {
+    int_cause |= 0x40 & (io_ports[0xB2] as i64);  // VBLANK_START latches into INT_CAUSE only when enabled (WSHWTest verifies this)
+    let ctrl: i64 = io_ports[0xA2] as i64;
+    if (ctrl & 4) == 0 { return; }
+    let cnt: i64 = vbl_count();
+    if cnt == 0 { return; }
+    if cnt == 1 {
+        if ((io_ports[0xB2] as i64) & 0x20) != 0 { int_cause |= 0x20; }
+        if (ctrl & 8) != 0 { set_vbl_count((io_ports[0xA6] as i64) | ((io_ports[0xA7] as i64) << 8)); } else { set_vbl_count(0); }
+    } else { set_vbl_count(cnt - 1); }
+}
+fn step_lfsr() {
+    let mode: i64 = (io_ports[0x8E] as i64) & 7;
+    var tap: i64 = 14;
+    if mode == 1 { tap = 10; } else if mode == 2 { tap = 13; } else if mode == 3 { tap = 4; } else if mode == 4 { tap = 8; } else if mode == 5 { tap = 6; } else if mode == 6 { tap = 9; } else if mode == 7 { tap = 11; }
+    let fb: i64 = 1 ^ ((lfsr >> 7) & 1) ^ ((lfsr >> tap) & 1);
+    lfsr = ((lfsr << 1) | fb) & 0x7FFF;
+}
+fn noise_tick(dc: i64) {
+    if ((io_ports[0x8E] as i64) & 0x10) == 0 { return; }        // NOISE_ENABLE
+    if ((io_ports[0x90] as i64) & 0x88) != 0x88 { return; }     // channel 4 on + noise mode
+    let pitch: i64 = (io_ports[0x86] as i64) | (((io_ports[0x87] as i64) & 7) << 8);
+    let period: i64 = 2048 - pitch;
+    noise_acc += dc;
+    while noise_acc >= period { noise_acc -= period; step_lfsr(); }
+}
+fn ws_line_events() {
+    noise_tick(ws_cycles - last_tick); last_tick = ws_cycles;
+    let line: i64 = (ws_cycles % 40704) / 256;
+    while last_line != line {
+        last_line += 1; if last_line >= 159 { last_line = 0; }
+        tick_hbl();
+        if last_line == 144 { tick_vbl(); }
+    }
+}
+fn init_cyc() {
+    for i in 256 { cyc_tab[i] = 4; }
+    for i in 0x40 { cyc_tab[i] = 3; }
+    cyc_tab[0x06] = 8; cyc_tab[0x07] = 7; cyc_tab[0x0E] = 8; cyc_tab[0x16] = 8; cyc_tab[0x17] = 7; cyc_tab[0x1E] = 8; cyc_tab[0x1F] = 7;
+    cyc_tab[0x0F] = 2; cyc_tab[0x27] = 10; cyc_tab[0x2F] = 10; cyc_tab[0x37] = 9; cyc_tab[0x3F] = 9;
+    for i in 0x10 { cyc_tab[0x40 + i] = 1; cyc_tab[0x50 + i] = 1; }
+    for i in 8 { cyc_tab[0x58 + i] = 1; cyc_tab[0xB0 + i] = 2; cyc_tab[0xB8 + i] = 3; }
+    cyc_tab[0x60] = 18; cyc_tab[0x61] = 15; cyc_tab[0x62] = 10; cyc_tab[0x63] = 2; cyc_tab[0x64] = 2; cyc_tab[0x65] = 2; cyc_tab[0x66] = 2; cyc_tab[0x67] = 2;
+    cyc_tab[0x68] = 8; cyc_tab[0x69] = 25; cyc_tab[0x6A] = 8; cyc_tab[0x6B] = 25; cyc_tab[0x6C] = 6; cyc_tab[0x6D] = 6; cyc_tab[0x6E] = 6; cyc_tab[0x6F] = 6;
+    for i in 0x10 { cyc_tab[0x70 + i] = 5; }
+    for i in 4 { cyc_tab[0x80 + i] = 1; }
+    cyc_tab[0x8C] = 3; cyc_tab[0x8D] = 5; cyc_tab[0x8E] = 3; cyc_tab[0x8F] = 7;
+    cyc_tab[0x90] = 1; cyc_tab[0x98] = 2; cyc_tab[0x99] = 2; cyc_tab[0x9A] = 15; cyc_tab[0x9B] = 2; cyc_tab[0x9C] = 8; cyc_tab[0x9D] = 7; cyc_tab[0x9E] = 2; cyc_tab[0x9F] = 2;
+    for i in 7 { cyc_tab[0x91 + i] = 1; }
+    for i in 4 { cyc_tab[0xA0 + i] = 1; cyc_tab[0xA4 + i] = 6; }
+    cyc_tab[0xA8] = 4; cyc_tab[0xA9] = 4;
+    for i in 6 { cyc_tab[0xAA + i] = 5; }
+    cyc_tab[0xC0] = 8; cyc_tab[0xC1] = 8; cyc_tab[0xC2] = 12; cyc_tab[0xC3] = 12; cyc_tab[0xC4] = 7; cyc_tab[0xC5] = 7; cyc_tab[0xC6] = 5; cyc_tab[0xC7] = 5;
+    cyc_tab[0xC8] = 12; cyc_tab[0xC9] = 6; cyc_tab[0xCA] = 14; cyc_tab[0xCB] = 14; cyc_tab[0xCC] = 20; cyc_tab[0xCD] = 20; cyc_tab[0xCE] = 20; cyc_tab[0xCF] = 16;
+    cyc_tab[0xD0] = 6; cyc_tab[0xD1] = 6; cyc_tab[0xD2] = 10; cyc_tab[0xD3] = 10; cyc_tab[0xD4] = 17; cyc_tab[0xD5] = 6; cyc_tab[0xD6] = 2; cyc_tab[0xD7] = 5;
+    for i in 8 { cyc_tab[0xD8 + i] = 2; }
+    for i in 4 { cyc_tab[0xE0 + i] = 6; cyc_tab[0xE4 + i] = 6; cyc_tab[0xEC + i] = 6; }
+    cyc_tab[0xE8] = 12; cyc_tab[0xE9] = 10; cyc_tab[0xEA] = 12; cyc_tab[0xEB] = 10;
+    for i in 6 { cyc_tab[0xF0 + i] = 2; }
+    cyc_tab[0xF6] = 5; cyc_tab[0xF7] = 5; cyc_tab[0xFE] = 1; cyc_tab[0xFF] = 5;
+    cyc_tab[0xE4] = 7; cyc_tab[0xE5] = 7; cyc_tab[0xE6] = 7; cyc_tab[0xE7] = 7; cyc_tab[0xEC] = 5; cyc_tab[0xED] = 5; cyc_tab[0xEE] = 5; cyc_tab[0xEF] = 5;
+    cyc_tab[0xFA] = 4; cyc_tab[0xFB] = 4;
+}
+fn cyc_f6f7(op: i64) -> i64 {
+    if op == 0xF6 {
+        if d_reg == 2 || d_reg == 3 { return 4; }
+        if d_reg == 4 { return 22; }
+        if d_reg == 5 { return 25; }
+        if d_reg == 6 { return 45; }
+        if d_reg == 7 { return 55; }
+        return 5;
+    }
+    if d_reg == 2 || d_reg == 3 { return 4; }
+    if d_reg == 4 { return 30; }
+    if d_reg == 5 { return 35; }
+    if d_reg == 6 { return 55; }
+    if d_reg == 7 { return 65; }
+    return 5;
+}
+fn cyc_ff() -> i64 {
+    if d_reg == 0 || d_reg == 1 { return 5; }
+    if d_reg == 2 { return 12; }
+    if d_reg == 3 { return 16; }
+    if d_reg == 4 { return 10; }
+    if d_reg == 5 { return 12; }
+    if d_reg == 6 { return 9; }
+    return 2;
+}
+fn est_cycles(pre_cx: i64) -> i64 {
+    let op: i64 = dbg_op;
+    if rep_prefix != 0 && op >= 0xA4 && op <= 0xAF {
+        if pre_cx == 0 { return 5; }
+        var n: i64 = pre_cx - (r[1] as i64); if n < 0 { n += 65536; }
+        if n == 0 { n = 1; }
+        return 4 + n * cyc_tab[op];
+    }
+    if op == 0xF6 || op == 0xF7 { return cyc_f6f7(op); }
+    if op == 0xFF { return cyc_ff(); }
+    return cyc_tab[op];
 }
 
 // Deliver the highest-priority pending hardware interrupt, if any is
@@ -79,7 +241,7 @@ fn ws_deliver_int() {
     var bit: i64 = 7;
     while bit > 0 && ((pending >> bit) & 1) == 0 { bit -= 1; }
     cpu_halted = false;
-    do_int((io_ports[0xB0] as i64) + bit);
+    do_int(((io_ports[0xB0] as i64) & 0xF8) + bit);
 }
 
 // Memory written during a case, so the next case can restore zeros.
@@ -972,7 +1134,8 @@ fn run_ws(path: u8[:]) {
     for i in 1048576 { mem[i] = 0; }
     for i in 256 { io_ports[i] = 0; }
     bk_ram = 0xFF; bk_rom0 = 0xFF; bk_rom1 = 0xFF; bk_linear = 0;
-    int_cause = 0; key_select = 0; keys_state = 0; cpu_halted = false;
+    int_cause = 0; key_select = 0; keys_state = 0; cpu_halted = false; sys_ctrl1 = 0x02;
+    ws_cycles = 0; last_line = 0; lfsr = 0; noise_acc = 0; last_tick = 0; init_cyc(); init_io_masks();
     for i in 8 { r[i] = 0; }
     for i in 4 { seg[i] = 0; }
     seg[1] = 0xFFFF; ip = 0; flags = 0;
@@ -994,13 +1157,15 @@ fn run_ws(path: u8[:]) {
         else if a3 == "mul" || a3 == "mul+" { menu_idx = 5; }
         else if a3 == "div" || a3 == "div+" { menu_idx = 6; }
         else if a3 == "sdiv" || a3 == "sdiv+" { menu_idx = 7; }
+        else if a3.len == 2 && a3[0] == 109 { menu_idx = (a3[1] as i64) - 48; }  // "m1".."m9": generic menu index (WSHWTest)
     }
     var skips: i64 = 0;
     var skip_hold: i64 = 0;
     var frame: i64 = 0;
     var done: bool = false;
-    while frame < 60000 && !done {
-        int_cause |= 0x40;  // VBLANK_START
+    var prev_keys: i64 = 0;
+    var dismiss: i64 = 0;
+    while frame < 2000000 && !done {
         keys_state = 0;
         if skip_hold > 0 { keys_state = 1 << 11; skip_hold -= 1; }
         if menu_idx > 0 {
@@ -1012,26 +1177,34 @@ fn run_ws(path: u8[:]) {
                 else if rel - menu_idx * 4 < 4 { keys_state = 1 << 10; }
             }
         } else if frame >= 30 && frame < 45 { keys_state = 1 << 10; }  // hold A to pick "Test All"
-        var step: i64 = 0;
-        while step < 100000 {
+        if dismiss > 0 { keys_state |= 1 << 10; dismiss -= 1; }  // auto-tap A to dismiss "press any key" HLT waits
+        if keys_state != 0 && prev_keys == 0 { int_cause |= 0x02 & (io_ports[0xB2] as i64); }  // KEY_PRESS cause latches on the press edge, only when enabled
+        prev_keys = keys_state;
+        var spent: i64 = 0;
+        while spent < 40704 {
             ws_deliver_int();
             if (flags & 0x0100) != 0 && dbg_op != 0x9D && dbg_op != 0xCF { do_int(1); }  // TF single-step trap
             if !cpu_halted {
+                let pre_cx: i64 = r[1] as i64;
                 if !exec_one() { print("unsupported opcode ", dbg_op, " at cs:ip ", seg[1], ":", dbg_ip, " frame ", frame); let m = ws_screen_text(screen); write_stdout(screen[..m]); exit(1); }
                 total += 1;
-            }
-            step += 1;
+                let c: i64 = est_cycles(pre_cx);
+                ws_cycles += c; spent += c;
+            } else { ws_cycles += 32; spent += 32; }
+            ws_line_events();
         }
         let n = ws_screen_text(screen);
         var same: bool = n == lastn;
         if same { for i in n { if screen[i] != last[i] { same = false; } } }
         if same { frozen += 1; } else { frozen = 0; for i in n { last[i] = screen[i]; } lastn = n; }
+        if frozen == 200 && cpu_halted { dismiss = 6; }
         if survey && frozen >= 90 && skips < 40 { skips += 1; print("survey skip ", skips, " at frame ", frame, " after ", total, " instructions; screen was:"); write_stdout(screen[..n]); skip_hold = 6; frozen = 0; for i in n { last[i] = 0; } lastn = 0; }
         else if frozen >= 600 { print("screen frozen for 600 frames at frame ", frame, " after ", total, " instructions (waiting for a key: end of Test All or a failure stop)"); done = true; }
         else if frame % 2000 == 0 { print("frame ", frame, " oks=", count_ok(screen, n)); write_stdout(screen[..n]); }
         frame += 1;
     }
     print("final screen (frame ", frame, ", ", total, " instructions):");
+    print("state: cs:ip=", seg[1], ":", ip, " ax=", r[0], " bx=", r[2], " cx=", r[1], " dx=", r[3], " sp=", r[4], " bp=", r[5], " si=", r[6], " di=", r[7], " flags=", flags, " halted=", cpu_halted, " line=", (ws_cycles % 40704) / 256, " cause=", int_cause, " enable=", io_ports[0xB2], " scr_area=", io_ports[0x07], " p60=", io_ports[0x60], " p01raw=", io_ports[0x01], " p01rd=", port_rd(1));
     let m = ws_screen_text(screen);
     write_stdout(screen[..m]);
 }
