@@ -66,7 +66,12 @@ and the next step recorded in the session notes.
 - Done when: real game ROMs run with sound.
 - Status 2026-11-07: timers, the interrupt controller semantics and
   the APU noise LFSR were pulled forward and are WSHWTest-verified.
-  Remaining: wave channels / sweep / volume (audible APU), DMA.
+  Wave channels, the sweep and GDMA have since landed: the mixer
+  readback ports (0x96–0x9B) are live, WSHWTest's sound sweep
+  suite passes all 12 cases including the fast-sweep CPU-cycle
+  measurement, and `sst apu_test` covers GDMA (26/26). Remaining:
+  Sound DMA + HyperVoice, cartridge EEPROM, serial; the audible
+  sample stream arrives with the M5 frontend.
 
 ## M5 — Frontend
 - Goose gfx package (SDL3): window, input, audio out.
