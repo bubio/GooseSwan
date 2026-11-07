@@ -63,6 +63,11 @@ fn port_rd(p: i64) -> i64 {
         if (key_select & 0x40) != 0 { v |= (keys_state >> 8) & 0x0F; }
         return v;
     }
+    if p == 0xBA { return ee_output[1] & 0xFF; }  // IEEPROM data: the READ output latch, not the input shadow
+    if p == 0xBB { return (ee_output[1] >> 8) & 0xFF; }
+    if p == 0xBE { return ie_status_read(); }  // IEEPROM status: ready | done | protect fault (reading polls the read delay)
+    if p >= 0xC4 && p <= 0xC7 { if cart_eeprom { return io_ports[p] as i64; } return 0xFF; }  // cart EEPROM latches, else open bus
+    if p == 0xC8 { if cart_eeprom { return 0x02 | ((io_ports[0xC8] as i64) & 1); } return 0xFF; }  // cart EEPROM status: ready | DONE
     if p == 0xC0 { return bk_linear; }
     if p == 0xC1 { return bk_ram; }
     if p == 0xC2 { return bk_rom0; }
@@ -102,6 +107,10 @@ fn port_wr(p: i64, v: i64) {
     if p == 0xB3 { io_ports[0xB3] = (v & 0xC4) as! u8; }  // SERIAL_CTRL: only enable/speed/overrun bits exist
     if p == 0xB1 || p == 0xB2 || p == 0xB3 { refresh_serial(); }  // serial TX-ready level feeds INT_CAUSE bit 0
     if p == 0x48 && (v & 0x80) != 0 { run_gdma(); }  // GDMA trigger: synchronous burst on the enable write
+    if p == 0xBE { ie_control(v); }  // IEEPROM control: execute the latched command (0xBC/0xBD)
+    if p == 0xBF { io_ports[0xBF] = (v & 1) as! u8; }  // IEEPROM-adjacent control: only bit 0 exists
+    if !cart_eeprom && p >= 0xC4 && p <= 0xC9 { io_ports[p] = 0; }  // no cart EEPROM: writes ignored
+    if p == 0xC8 && cart_eeprom { ce_control(v); }  // cart EEPROM control: high nibble selects the operation
     if p == 0xA0 { sys_ctrl1 = (sys_ctrl1 & 0x87) | (v & 0x0C); }
     else if p == 0xB5 { key_select = v & 0x70; }  // KEYPAD: only select bits 4-6 exist
     else if p == 0xB6 { int_cause = int_cause & ~v; }  // INT_CAUSE_CLEAR
@@ -229,6 +238,175 @@ fn sdma_tick(dc: i64) {
     }
 }
 
+// ---- Serial EEPROMs (93Cxx / Microwire), following Swanium's cart
+// device: device 0 = cartridge EEPROM (ports 0xC4-0xC8, present only
+// when the ROM footer's save type says so, 0xFF-filled and write-
+// locked at power-on), device 1 = the console's internal EEPROM
+// (ports 0xBA-0xBE, 2048 bytes, zero-filled, writes enabled, with a
+// protected system range from byte 0x60). One backing store: the
+// cartridge device at offset 0, the internal at offset 2048.
+// A command word is: start bit at bits+2, 2-bit opcode at bits,
+// word address in the low bits; opcode 0 is the extended group
+// (EWDS / WRAL / ERAL / EWEN in the 2 bits below the opcode field).
+var ee_data: u8[4096];
+var ee_input: i64[2];
+var ee_output: i64[2];
+var ee_wen: bool[2];
+var ee_size: i64[2];
+var ee_bits: i64[2];
+var cart_eeprom: bool = false;
+var ie_done: bool = false;
+var ie_delay: i64 = 0;
+var ie_fault: bool = false;
+
+fn ee_execute(dev: i64, comm: i64, bits: i64) {
+    if (comm >> (bits + 3)) != 0 { return; }
+    if ((comm >> (bits + 2)) & 1) == 0 { return; }
+    let opcode: i64 = (comm >> bits) & 3;
+    let base: i64 = dev * 2048;
+    if opcode == 0 {
+        let sub: i64 = (comm >> (bits - 2)) & 3;
+        if sub == 0 { ee_wen[dev] = false; }
+        else if sub == 3 { ee_wen[dev] = true; }
+        else if sub == 1 && ee_wen[dev] {
+            let lo: i64 = ee_input[dev] & 0xFF; let hi: i64 = (ee_input[dev] >> 8) & 0xFF;
+            for i in ee_size[dev] { if i % 2 == 0 { ee_data[base + i] = lo as! u8; } else { ee_data[base + i] = hi as! u8; } }
+        }
+        else if sub == 2 && ee_wen[dev] { for i in ee_size[dev] { ee_data[base + i] = 0xFF; } }
+        return;
+    }
+    let baddr: i64 = (comm & ((1 << bits) - 1)) * 2;
+    if baddr + 1 >= ee_size[dev] { return; }
+    if opcode == 1 && ee_wen[dev] { ee_data[base + baddr] = (ee_input[dev] & 0xFF) as! u8; ee_data[base + baddr + 1] = ((ee_input[dev] >> 8) & 0xFF) as! u8; }
+    else if opcode == 2 { ee_output[dev] = (ee_data[base + baddr] as i64) | ((ee_data[base + baddr + 1] as i64) << 8); }
+    else if opcode == 3 && ee_wen[dev] { ee_data[base + baddr] = 0xFF; ee_data[base + baddr + 1] = 0xFF; }
+}
+
+fn ee_init_cart(save: i64) {
+    cart_eeprom = false; ee_size[0] = 0; ee_bits[0] = 0; ee_wen[0] = false; ee_input[0] = 0; ee_output[0] = 0xFFFF;
+    var size: i64 = 0; var bits: i64 = 0;
+    if save == 0x10 { size = 128; bits = 6; }
+    else if save == 0x50 { size = 1024; bits = 9; }
+    else if save == 0x20 { size = 2048; bits = 10; }
+    if size > 0 { cart_eeprom = true; ee_size[0] = size; ee_bits[0] = bits; for i in size { ee_data[i] = 0xFF; } }
+    ee_size[1] = 2048; ee_bits[1] = 10; ee_wen[1] = true; ee_input[1] = 0; ee_output[1] = 0xFFFF;
+    for i in 2048 { ee_data[2048 + i] = 0; }
+    ie_done = false; ie_delay = 0; ie_fault = false;
+}
+
+// The internal EEPROM speaks two command widths: the start bit at
+// bit 12 selects the 10-bit (colour) form, otherwise the 6-bit
+// mono-compatible form, over the same storage.
+fn ie_bits(comm: i64) -> i64 { if (comm & 0x1000) != 0 { return 10; } return 6; }
+
+fn ie_status_read() -> i64 {
+    var v: i64 = 0x02;
+    if ie_done { v |= 1; }
+    if ie_fault { v |= 0x80; }
+    if ie_delay > 0 { ie_delay -= 1; if ie_delay == 0 { ie_done = true; } }
+    return v;
+}
+
+fn ie_control(v: i64) {
+    let comm: i64 = (io_ports[0xBC] as i64) | ((io_ports[0xBD] as i64) << 8);
+    if v == 0x10 { ee_execute(1, comm, ie_bits(comm)); ie_done = false; ie_delay = 1; }
+    else if v == 0x20 {
+        ee_input[1] = (io_ports[0xBA] as i64) | ((io_ports[0xBB] as i64) << 8);
+        let baddr: i64 = (comm & ((1 << ie_bits(comm)) - 1)) * 2;
+        if baddr >= 0x60 { ie_fault = true; ie_done = true; ie_delay = 0; }
+        else { ee_execute(1, comm, ie_bits(comm)); ie_done = false; ie_delay = 0; }
+    }
+    else if v == 0x40 { ee_execute(1, comm, ie_bits(comm)); ie_done = true; ie_delay = 0; }
+    else { ie_done = false; ie_delay = 0; }
+}
+
+fn ce_control(v: i64) {
+    let op: i64 = v >> 4;
+    let data: i64 = (io_ports[0xC4] as i64) | ((io_ports[0xC5] as i64) << 8);
+    let comm: i64 = (io_ports[0xC6] as i64) | ((io_ports[0xC7] as i64) << 8);
+    var new_data: i64 = data;
+    if op == 1 { ee_execute(0, comm, ee_bits[0]); new_data = ee_output[0]; }
+    else if op == 2 { ee_input[0] = data; ee_execute(0, comm, ee_bits[0]); }
+    else if op == 4 { ee_execute(0, comm, ee_bits[0]); }
+    io_ports[0xC4] = (new_data & 0xFF) as! u8; io_ports[0xC5] = ((new_data >> 8) & 0xFF) as! u8;
+    var done: i64 = 0; if op == 1 || op == 8 { done = 1; }
+    io_ports[0xC8] = ((v & 0xF0) | 0x02 | done) as! u8;
+}
+
+var ee_pass: i64 = 0;
+var ee_fail: i64 = 0;
+
+fn ee_check(name: const u8[:], got: i64, want: i64) {
+    if got == want { ee_pass += 1; }
+    else { ee_fail += 1; print("FAIL ", name, ": got ", got, " want ", want); }
+}
+
+fn ee_reset(save: i64) {
+    for i in 256 { io_ports[i] = 0; }
+    ws_mode = true; ws_mono_cart = false; dbg_op = 0;
+    ee_init_cart(save);
+}
+
+fn eeprom_test() {
+    // Internal EEPROM: Swanium's bus-test sequences, through the ports
+    ee_reset(0);
+    port_wr(0xBC, 0x00); port_wr(0xBD, 0x18); port_wr(0xBE, 0x10);
+    ee_check("ie read done delayed", port_rd(0xBE) & 1, 0);
+    ee_check("ie read done after poll", port_rd(0xBE) & 1, 1);
+    ee_check("ie default word lo", port_rd(0xBA), 0);
+    ee_check("ie default word hi", port_rd(0xBB), 0);
+    ee_reset(0);
+    port_wr(0xBA, 0xEF); port_wr(0xBB, 0xBE); port_wr(0xBC, 0x00); port_wr(0xBD, 0x14); port_wr(0xBE, 0x20);
+    ee_check("ie status ready", port_rd(0xBE) & 2, 2);
+    port_wr(0xBC, 0x00); port_wr(0xBD, 0x18); port_wr(0xBE, 0x10);
+    port_rd(0xBE); port_rd(0xBE);
+    ee_check("ie roundtrip lo", port_rd(0xBA), 0xEF);
+    ee_check("ie roundtrip hi", port_rd(0xBB), 0xBE);
+    ee_reset(0);
+    port_wr(0xBA, 0x55); port_wr(0xBB, 0xAA); port_wr(0xBC, 0x40); port_wr(0xBD, 0x01); port_wr(0xBE, 0x20);
+    port_wr(0xBC, 0x00); port_wr(0xBD, 0x18); port_wr(0xBE, 0x10);
+    port_rd(0xBE); port_rd(0xBE);
+    ee_check("ie mono-width write lo", port_rd(0xBA), 0x55);
+    ee_check("ie mono-width write hi", port_rd(0xBB), 0xAA);
+    ee_reset(0);
+    port_wr(0xBA, 0x34); port_wr(0xBB, 0x12); port_wr(0xBC, 0x30); port_wr(0xBD, 0x14); port_wr(0xBE, 0x20);
+    ee_check("ie protect fault bit", port_rd(0xBE) & 0x80, 0x80);
+    port_wr(0xBC, 0x30); port_wr(0xBD, 0x18); port_wr(0xBE, 0x10);
+    port_rd(0xBE); port_rd(0xBE);
+    ee_check("ie protected word lo", port_rd(0xBA), 0);
+    ee_check("ie protected word hi", port_rd(0xBB), 0);
+    // Cartridge EEPROM (128-byte device, 6-bit commands), through the ports
+    ee_reset(0x10);
+    port_wr(0xC4, 0xCD); port_wr(0xC5, 0xAB); port_wr(0xC6, 0x40); port_wr(0xC7, 0x01); port_wr(0xC8, 0x20);
+    port_wr(0xC6, 0x80); port_wr(0xC7, 0x01); port_wr(0xC8, 0x10);
+    ee_check("ce locked write blocked lo", port_rd(0xC4), 0xFF);
+    ee_check("ce locked write blocked hi", port_rd(0xC5), 0xFF);
+    ee_check("ce read sets DONE", port_rd(0xC8) & 1, 1);
+    ee_check("ce status ready bit", port_rd(0xC8) & 2, 2);
+    port_wr(0xC6, 0x30); port_wr(0xC7, 0x01); port_wr(0xC8, 0x40);
+    ee_check("ce short command keeps DONE clear", port_rd(0xC8) & 1, 0);
+    port_wr(0xC4, 0xCD); port_wr(0xC5, 0xAB); port_wr(0xC6, 0x40); port_wr(0xC7, 0x01); port_wr(0xC8, 0x20);
+    port_wr(0xC6, 0x80); port_wr(0xC7, 0x01); port_wr(0xC8, 0x10);
+    ee_check("ce write after EWEN lo", port_rd(0xC4), 0xCD);
+    ee_check("ce write after EWEN hi", port_rd(0xC5), 0xAB);
+    port_wr(0xC4, 0x00); port_wr(0xC5, 0x00); port_wr(0xC6, 0x41); port_wr(0xC7, 0x01); port_wr(0xC8, 0x20);
+    port_wr(0xC6, 0xC1); port_wr(0xC7, 0x01); port_wr(0xC8, 0x40);
+    port_wr(0xC6, 0x81); port_wr(0xC7, 0x01); port_wr(0xC8, 0x10);
+    ee_check("ce erase restores ones", port_rd(0xC4), 0xFF);
+    port_wr(0xC6, 0x00); port_wr(0xC7, 0x01); port_wr(0xC8, 0x40);
+    port_wr(0xC4, 0x34); port_wr(0xC5, 0x12); port_wr(0xC6, 0x40); port_wr(0xC7, 0x01); port_wr(0xC8, 0x20);
+    port_wr(0xC6, 0x80); port_wr(0xC7, 0x01); port_wr(0xC8, 0x10);
+    ee_check("ce EWDS blocks write lo", port_rd(0xC4), 0xCD);
+    ee_check("ce EWDS blocks write hi", port_rd(0xC5), 0xAB);
+    // No cartridge EEPROM: open bus, writes ignored
+    ee_reset(0);
+    ee_check("ce absent data reads open bus", port_rd(0xC4), 0xFF);
+    ee_check("ce absent status reads open bus", port_rd(0xC8), 0xFF);
+    port_wr(0xC4, 0x55);
+    ee_check("ce absent writes ignored", port_rd(0xC4), 0xFF);
+    print("eeprom_test: ", ee_pass, " passed, ", ee_fail, " failed");
+}
+
 fn ws_line_events() {
     let apu_dc: i64 = ws_cycles - last_tick;
     noise_tick(apu_dc);
@@ -300,6 +478,7 @@ fn run_ws(path: u8[:]) {
     cpu_mz = true;
     guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
     if rom.len > 16 { ws_mono_cart = (rom[rom.len - 9] as i64) == 0; }
+    if rom.len > 16 { ee_init_cart(rom[rom.len - 5] as i64); }
     print("rom loaded: ", rom.len, " bytes");
     for i in 1048576 { mem[i] = 0; }
     for i in 256 { io_ports[i] = 0; }

@@ -149,6 +149,7 @@ fn main() {
     if argv[1] == "ws" { run_ws(argv[2]); return; }
     if argv[1] == "ppu_test" { ppu_test(); return; }
     if argv[1] == "apu_test" { apu_test(); return; }
+    if argv[1] == "eeprom_test" { eeprom_test(); return; }
     var start: i64 = 1;
     if argv[1] == "v20" { cpu_v20 = true; start = 2; }
     for i in start..argv.len { run_file(argv[i]); }

@@ -76,9 +76,10 @@ and the next step recorded in the session notes.
   quantisation/data-dependent edges left. One correction from
   that slice: GDMA raises no interrupt (bit 3 is SERIAL_RECEIVE).
   Sound DMA + HyperVoice landed 2026-11-08 (Swanium-modelled,
-  `sst apu_test` 68/68). Remaining: cartridge EEPROM, serial
-  byte protocol; the audible sample stream arrives with the M5
-  frontend.
+  `sst apu_test` 68/68), and the cartridge + internal EEPROMs
+  landed the same day (`sst eeprom_test` 25/25). Remaining: the
+  serial byte protocol only; the audible sample stream arrives
+  with the M5 frontend.
 
 ## M5 — Frontend
 - Goose gfx package (SDL3): window, input, audio out.
