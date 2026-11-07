@@ -38,7 +38,19 @@ var keys_state: i64 = 0;   // Y1-4 bits 0-3, X1-4 bits 4-7, Start bit 9, A bit 1
 var cpu_halted: bool = false;
 var ws_cycles: i64 = 0;     // total CPU cycles since reset (WS mode): drives the scanline model
 var last_line: i64 = 0;     // scanline the model has advanced to (0..158)
-var cyc_tab: i64[256] = [0; 256];  // first-pass per-opcode cycle estimates for the WS timing model
+var cyc_tab: i64[256] = [0; 256];  // per-opcode cycle estimates for the WS timing model (fitted against WSTimingTest)
+var dbg_taken: bool = false;  // last branch outcome, for the cycle estimator
+var dbg_back: bool = false;  // last branch jumped backward
+var dbg_head: i64 = 0;  // target offset of the last taken relative branch
+var xfer_flag: bool = false;  // a control transfer already executed in the current loop iteration (the loop tail then costs +2: second prefetch flush)
+var dbg_odd: bool = false;  // last relative branch landed on an odd offset
+var dbg_disp: i64 = 0;  // displacement of the last relative branch (loop span = -disp)
+var dbg_shift_cnt: i64 = 0;  // effective shift count of the last shift/rotate
+var fault_chg: i64 = 0;  // interrupt-entry charge when the last instruction faulted (set in do_int)
+var fault_base: i64 = 0;  // partial-execution cost of the faulting instruction
+var cyc_in_exec: bool = false;  // true while exec_one runs under the WS runner
+var d_valid: bool = false;  // a ModRM was decoded for the current instruction
+var d_rm: i64 = 0;  // rm field of the current ModRM
 var io_wmask_m: i64[256] = [0; 256];   // SPHINX mono-mode port write masks (WSHWTest ioRegMasksSPHINXMono)
 var io_always_m: i64[256] = [0; 256];  // SPHINX mono-mode port always-set read bits
 var io_wmask_c: i64[256] = [0; 256];   // SPHINX colour-mode port write masks (WSHWTest ioRegMasksSPHINX)
@@ -167,68 +179,148 @@ fn ws_line_events() {
 }
 fn init_cyc() {
     for i in 256 { cyc_tab[i] = 4; }
-    for i in 0x40 { cyc_tab[i] = 3; }
-    cyc_tab[0x06] = 8; cyc_tab[0x07] = 7; cyc_tab[0x0E] = 8; cyc_tab[0x16] = 8; cyc_tab[0x17] = 7; cyc_tab[0x1E] = 8; cyc_tab[0x1F] = 7;
-    cyc_tab[0x0F] = 2; cyc_tab[0x27] = 10; cyc_tab[0x2F] = 10; cyc_tab[0x37] = 9; cyc_tab[0x3F] = 9;
+    for i in 0x40 { cyc_tab[i] = 3; }  // ALU block; form splits applied in est_cycles
+    cyc_tab[0x06] = 2; cyc_tab[0x0E] = 2; cyc_tab[0x16] = 2; cyc_tab[0x1E] = 2;
+    cyc_tab[0x07] = 3; cyc_tab[0x17] = 3; cyc_tab[0x1F] = 3;
+    cyc_tab[0x0F] = 1; cyc_tab[0x27] = 10; cyc_tab[0x2F] = 11; cyc_tab[0x37] = 10; cyc_tab[0x3F] = 10;
     for i in 0x10 { cyc_tab[0x40 + i] = 1; cyc_tab[0x50 + i] = 1; }
-    for i in 8 { cyc_tab[0x58 + i] = 1; cyc_tab[0xB0 + i] = 2; cyc_tab[0xB8 + i] = 3; }
-    cyc_tab[0x60] = 18; cyc_tab[0x61] = 15; cyc_tab[0x62] = 10; cyc_tab[0x63] = 2; cyc_tab[0x64] = 2; cyc_tab[0x65] = 2; cyc_tab[0x66] = 2; cyc_tab[0x67] = 2;
-    cyc_tab[0x68] = 8; cyc_tab[0x69] = 25; cyc_tab[0x6A] = 8; cyc_tab[0x6B] = 25; cyc_tab[0x6C] = 6; cyc_tab[0x6D] = 6; cyc_tab[0x6E] = 6; cyc_tab[0x6F] = 6;
-    for i in 0x10 { cyc_tab[0x70 + i] = 5; }
-    for i in 4 { cyc_tab[0x80 + i] = 1; }
-    cyc_tab[0x8C] = 3; cyc_tab[0x8D] = 5; cyc_tab[0x8E] = 3; cyc_tab[0x8F] = 7;
-    cyc_tab[0x90] = 1; cyc_tab[0x98] = 2; cyc_tab[0x99] = 2; cyc_tab[0x9A] = 15; cyc_tab[0x9B] = 2; cyc_tab[0x9C] = 8; cyc_tab[0x9D] = 7; cyc_tab[0x9E] = 2; cyc_tab[0x9F] = 2;
-    for i in 7 { cyc_tab[0x91 + i] = 1; }
-    for i in 4 { cyc_tab[0xA0 + i] = 1; cyc_tab[0xA4 + i] = 6; }
-    cyc_tab[0xA8] = 4; cyc_tab[0xA9] = 4;
-    for i in 6 { cyc_tab[0xAA + i] = 5; }
-    cyc_tab[0xC0] = 8; cyc_tab[0xC1] = 8; cyc_tab[0xC2] = 12; cyc_tab[0xC3] = 12; cyc_tab[0xC4] = 7; cyc_tab[0xC5] = 7; cyc_tab[0xC6] = 5; cyc_tab[0xC7] = 5;
-    cyc_tab[0xC8] = 12; cyc_tab[0xC9] = 6; cyc_tab[0xCA] = 14; cyc_tab[0xCB] = 14; cyc_tab[0xCC] = 20; cyc_tab[0xCD] = 20; cyc_tab[0xCE] = 20; cyc_tab[0xCF] = 16;
-    cyc_tab[0xD0] = 6; cyc_tab[0xD1] = 6; cyc_tab[0xD2] = 10; cyc_tab[0xD3] = 10; cyc_tab[0xD4] = 17; cyc_tab[0xD5] = 6; cyc_tab[0xD6] = 2; cyc_tab[0xD7] = 5;
-    for i in 8 { cyc_tab[0xD8 + i] = 2; }
-    for i in 4 { cyc_tab[0xE0 + i] = 6; cyc_tab[0xE4 + i] = 6; cyc_tab[0xEC + i] = 6; }
-    cyc_tab[0xE8] = 12; cyc_tab[0xE9] = 10; cyc_tab[0xEA] = 12; cyc_tab[0xEB] = 10;
-    for i in 6 { cyc_tab[0xF0 + i] = 2; }
-    cyc_tab[0xF6] = 5; cyc_tab[0xF7] = 5; cyc_tab[0xFE] = 1; cyc_tab[0xFF] = 5;
+    for i in 8 { cyc_tab[0x58 + i] = 1; cyc_tab[0xB0 + i] = 1; cyc_tab[0xB8 + i] = 1; }
+    cyc_tab[0x60] = 9; cyc_tab[0x61] = 9; cyc_tab[0x62] = 14;
+    cyc_tab[0x63] = 1; cyc_tab[0x64] = 1; cyc_tab[0x65] = 1; cyc_tab[0x66] = 1; cyc_tab[0x67] = 1;
+    cyc_tab[0x68] = 1; cyc_tab[0x6A] = 1; cyc_tab[0x6C] = 5; cyc_tab[0x6D] = 5; cyc_tab[0x6E] = 5; cyc_tab[0x6F] = 5;
+    for i in 4 { cyc_tab[0x80 + i] = 3; }
+    cyc_tab[0x84] = 2; cyc_tab[0x85] = 2; cyc_tab[0x86] = 5; cyc_tab[0x87] = 5;
+    cyc_tab[0x88] = 1; cyc_tab[0x89] = 1; cyc_tab[0x8A] = 1; cyc_tab[0x8B] = 1;
+    cyc_tab[0x8C] = 1; cyc_tab[0x8D] = 1; cyc_tab[0x8F] = 3;
+    cyc_tab[0x90] = 1;
+    for i in 7 { cyc_tab[0x91 + i] = 3; }
+    cyc_tab[0x98] = 1; cyc_tab[0x99] = 1; cyc_tab[0x9A] = 8; cyc_tab[0x9B] = 10; cyc_tab[0x9C] = 2; cyc_tab[0x9D] = 3; cyc_tab[0x9E] = 4; cyc_tab[0x9F] = 2;
+    for i in 4 { cyc_tab[0xA0 + i] = 1; }
+    cyc_tab[0xA4] = 5; cyc_tab[0xA5] = 5; cyc_tab[0xA6] = 6; cyc_tab[0xA7] = 6; cyc_tab[0xA8] = 1; cyc_tab[0xA9] = 1;
+    cyc_tab[0xAA] = 3; cyc_tab[0xAB] = 3; cyc_tab[0xAC] = 3; cyc_tab[0xAD] = 3; cyc_tab[0xAE] = 4; cyc_tab[0xAF] = 4;
+    cyc_tab[0xC2] = 4; cyc_tab[0xC3] = 4; cyc_tab[0xC4] = 6; cyc_tab[0xC5] = 6; cyc_tab[0xC6] = 1; cyc_tab[0xC7] = 1;
+    cyc_tab[0xC8] = 8; cyc_tab[0xC9] = 3; cyc_tab[0xCA] = 7; cyc_tab[0xCB] = 6; cyc_tab[0xCC] = 41; cyc_tab[0xCD] = 42; cyc_tab[0xCE] = 6; cyc_tab[0xCF] = 8;
+    cyc_tab[0xD4] = 16; cyc_tab[0xD5] = 6; cyc_tab[0xD6] = 8; cyc_tab[0xD7] = 5;
+    for i in 8 { cyc_tab[0xD8 + i] = 1; }
     cyc_tab[0xE4] = 7; cyc_tab[0xE5] = 7; cyc_tab[0xE6] = 7; cyc_tab[0xE7] = 7; cyc_tab[0xEC] = 5; cyc_tab[0xED] = 5; cyc_tab[0xEE] = 5; cyc_tab[0xEF] = 5;
-    cyc_tab[0xFA] = 4; cyc_tab[0xFB] = 4;
+    cyc_tab[0xE8] = 3; cyc_tab[0xE9] = 2; cyc_tab[0xEA] = 5; cyc_tab[0xEB] = 2;
+    cyc_tab[0xF1] = 1; cyc_tab[0xF5] = 4; cyc_tab[0xF6] = 5; cyc_tab[0xF7] = 5; cyc_tab[0xFE] = 3; cyc_tab[0xFF] = 5;
+    cyc_tab[0xF8] = 4; cyc_tab[0xF9] = 4; cyc_tab[0xFA] = 4; cyc_tab[0xFB] = 4; cyc_tab[0xFC] = 4; cyc_tab[0xFD] = 4;
 }
-fn cyc_f6f7(op: i64) -> i64 {
-    if op == 0xF6 {
-        if d_reg == 2 || d_reg == 3 { return 4; }
-        if d_reg == 4 { return 22; }
-        if d_reg == 5 { return 25; }
-        if d_reg == 6 { return 45; }
-        if d_reg == 7 { return 55; }
-        return 5;
-    }
-    if d_reg == 2 || d_reg == 3 { return 4; }
-    if d_reg == 4 { return 30; }
-    if d_reg == 5 { return 35; }
-    if d_reg == 6 { return 55; }
-    if d_reg == 7 { return 65; }
-    return 5;
-}
-fn cyc_ff() -> i64 {
-    if d_reg == 0 || d_reg == 1 { return 5; }
-    if d_reg == 2 { return 12; }
-    if d_reg == 3 { return 16; }
-    if d_reg == 4 { return 10; }
-    if d_reg == 5 { return 12; }
-    if d_reg == 6 { return 9; }
+
+// Extra cost of a two-register EA ([bx+si] style forms) over a one-register
+// or direct EA, per WSTimingTest's addressing page. LEA/LES/LDS/POP-mem pay
+// only 1; most other ModRM ops pay 2.
+fn ea_premium(op: i64) -> i64 {
+    if !d_valid || d_isreg { return 0; }
+    if d_rm > 3 { return 0; }
+    if op >= 0xD8 && op <= 0xDF { return 0; }
+    if op == 0x8D || op == 0xC4 || op == 0xC5 || op == 0x8F { return 1; }
     return 2;
 }
+
+fn cyc_alu(op: i64) -> i64 {
+    let f: i64 = op & 7;
+    if f >= 6 { return cyc_tab[op]; }  // PUSH/POP segment
+    if f >= 4 { return 1; }  // accumulator, immediate
+    if op >= 0x38 { if d_isreg { return 1; } return 2 + ea_premium(op); }  // CMP has no writeback
+    if f <= 1 { if d_isreg { return 1; } return 3 + ea_premium(op); }  // r/m destination (read-modify-write)
+    if d_isreg { return 1; } return 2 + ea_premium(op);  // register destination, memory source
+}
+
+fn cyc_f6f7(op: i64) -> i64 {
+    if d_reg == 0 { return 2; }
+    if d_reg == 1 { return 1; }
+    if d_reg == 2 || d_reg == 3 { return 3; }
+    if d_reg == 4 || d_reg == 5 { return 4; }
+    if d_reg == 6 { if op == 0xF6 { return 16; } return 24; }
+    if d_reg == 7 { if op == 0xF6 { return 18; } return 25; }
+    return 5;
+}
+
+fn cyc_ff() -> i64 {
+    if d_reg == 0 || d_reg == 1 { if d_isreg { return 1; } return 3; }
+    if d_reg == 2 { return 4; }
+    if d_reg == 3 { return 12; }
+    if d_reg == 4 { return 4; }
+    if d_reg == 5 { return 8; }
+    if d_reg == 6 { return 2; }
+    return 1;
+}
+
+fn cyc_fe() -> i64 {
+    if d_reg == 0 || d_reg == 1 { if d_isreg { return 1; } return 3; }
+    if d_reg == 6 { return 2; }
+    return 1;
+}
+
+fn cyc_loop(op: i64) -> i64 {
+    if op == 0xE3 { return 2; }
+    if !dbg_taken { return 2; }
+    if dbg_back { return 6; }
+    if op == 0xE2 { return 3; }
+    return 4;
+}
+
+fn rep_cost(op: i64, n: i64) -> i64 {
+    if n == 0 { return 5; }
+    if op == 0xA4 || op == 0xA5 { return 5 + 7 * n; }
+    if op == 0xA6 || op == 0xA7 { return 5 + 10 * n; }
+    if op == 0xAE || op == 0xAF { return 5 + 9 * n; }
+    return 5 + 6 * n;
+}
+
+// Partial-execution cost of a faulting instruction, before the 44-cycle
+// interrupt entry (fitted from WSTimingTest's exception page).
+fn cyc_fault_base() -> i64 {
+    if dbg_op == 0xF6 || dbg_op == 0xF7 { if d_reg == 7 { return 8; } return 5; }
+    if dbg_op == 0xD4 { return 4; }
+    if dbg_op == 0x62 { return 9; }
+    if dbg_op == 0xCE { return 1; }
+    return 0;
+}
+
 fn est_cycles(pre_cx: i64) -> i64 {
     let op: i64 = dbg_op;
-    if rep_prefix != 0 && op >= 0xA4 && op <= 0xAF {
-        if pre_cx == 0 { return 5; }
+    if fault_chg > 0 { xfer_flag = true; return fault_base + fault_chg; }
+    var c: i64 = 0;
+    var is_tail: bool = false;
+    var sets_xfer: bool = false;
+    if rep_prefix != 0 && ((op >= 0xA4 && op <= 0xAF) || (op >= 0x6C && op <= 0x6F)) {
         var n: i64 = pre_cx - (r[1] as i64); if n < 0 { n += 65536; }
-        if n == 0 { n = 1; }
-        return 4 + n * cyc_tab[op];
+        c = rep_cost(op, n);
     }
-    if op == 0xF6 || op == 0xF7 { return cyc_f6f7(op); }
-    if op == 0xFF { return cyc_ff(); }
-    return cyc_tab[op];
+    else if op == 0xF6 || op == 0xF7 { c = cyc_f6f7(op) + ea_premium(op); }
+    else if op == 0xFF { c = cyc_ff() + ea_premium(op); if d_reg >= 2 && d_reg <= 5 { sets_xfer = true; } }
+    else if op == 0xFE { c = cyc_fe() + ea_premium(op); }
+    else if op >= 0x70 && op <= 0x7F {
+        if dbg_taken {
+            sets_xfer = true;
+            if dbg_back { is_tail = true; c = 5; } else { c = 2; }
+            if dbg_odd { c += 1; }
+        } else { c = 1; }
+    }
+    else if op >= 0xE0 && op <= 0xE3 {
+        c = cyc_loop(op);
+        if dbg_taken { sets_xfer = true; if dbg_back { is_tail = true; } }
+    }
+    else if (op >= 0xC0 && op <= 0xC1) || (op >= 0xD0 && op <= 0xD3) { var sc: i64 = dbg_shift_cnt; if sc > 2 { sc = 2; } c = 1 + 2 * sc + ea_premium(op); }
+    else if op < 0x40 { c = cyc_alu(op); }
+    else if op == 0x69 || op == 0x6B { if d_isreg { c = 3; } else { c = 4 + ea_premium(op); } }
+    else if op == 0x84 || op == 0x85 { if d_isreg { c = 1; } else { c = 2 + ea_premium(op); } }
+    else if op == 0x86 || op == 0x87 { if d_isreg { c = 3; } else { c = 5 + ea_premium(op); } }
+    else if op == 0x8E { if d_isreg { c = 2; } else { c = 3 + ea_premium(op); } }
+    else if op == 0x8F { if d_isreg { c = 1; } else { c = 3 + ea_premium(op); } }
+    else if op >= 0x80 && op <= 0x83 { if d_isreg { c = 1; } else { c = 3 + ea_premium(op); } }
+    else if op == 0xC4 || op == 0xC5 { if d_isreg { c = 8; } else { c = 6 + ea_premium(op); } }
+    else {
+        c = cyc_tab[op] + ea_premium(op);
+        if (op == 0xE9 || op == 0xEB) && dbg_odd { c += 1; }
+        if op == 0xE8 || op == 0xE9 || op == 0xEA || op == 0xEB || op == 0x9A || op == 0xC2 || op == 0xC3 || op == 0xCA || op == 0xCB || op == 0xCF { sets_xfer = true; }
+    }
+    if is_tail { if xfer_flag { c += 2; } else if op >= 0x70 && op <= 0x7F && 0 - dbg_disp <= 4 { c -= 1; } xfer_flag = false; }
+    else if sets_xfer { xfer_flag = true; }
+    return c;
 }
 
 // Deliver the highest-priority pending hardware interrupt, if any is
@@ -237,10 +329,10 @@ fn est_cycles(pre_cx: i64) -> i64 {
 fn ws_deliver_int() {
     let pending: i64 = int_cause & (io_ports[0xB2] as i64);
     if pending == 0 { return; }
+    cpu_halted = false;  // a pending enabled interrupt wakes HLT even with IF=0 (it just isn't serviced then; WSTimingTest's HLT case relies on this)
     if (flags & 0x0200) == 0 { return; }
     var bit: i64 = 7;
     while bit > 0 && ((pending >> bit) & 1) == 0 { bit -= 1; }
-    cpu_halted = false;
     do_int(((io_ports[0xB0] as i64) & 0xF8) + bit);
 }
 
@@ -294,6 +386,7 @@ fn decode_modrm() {
     let mod: i64 = m >> 6;
     d_reg = (m >> 3) & 7;
     let rm: i64 = m & 7;
+    d_rm = rm; d_valid = true;
     if mod == 3 { d_isreg = true; d_regidx = rm; d_off = 0; d_segbase = 0;
         if cpu_mz {
             // V30MZ quirk (WSCpuTest): with mod=3 the EA adder still runs,
@@ -425,8 +518,9 @@ fn cond(c: i64) -> bool {
 }
 fn disp8s() -> i64 { let b = fetch8(); let bi: i64 = b; if bi > 127 { bi - 256 } else { bi } }
 fn disp16s() -> i64 { let v = fetch16(); let vi: i64 = v; if vi > 32767 { vi - 65536 } else { vi } }
-fn rel_jump(d: i64) { ip = (((ip as i64) + d) & 0xFFFF) as! u16; }
+fn rel_jump(d: i64) { ip = (((ip as i64) + d) & 0xFFFF) as! u16; dbg_head = ip as i64; dbg_odd = ((ip as i64) & 1) != 0; dbg_disp = d; }
 fn do_int(n: i64) {
+    if cyc_in_exec && dbg_op != 0xCC && dbg_op != 0xCD { fault_chg = 44; fault_base = cyc_fault_base(); }  // fault/interrupt-entry charge for the cycle estimator (INT opcodes carry theirs in cyc_tab)
     push16(flags as i64);
     push16(seg[1] as i64);
     push16(ip as i64);
@@ -452,6 +546,7 @@ fn shift_op(kind: i64, v: i64, count: i64, bits: i64) -> i64 {
     // On this CPU the flags behave as if latched from the final 1-bit step.
     var cnt: i64 = count;
     if cpu_mz { cnt = cnt & 0x1F; }  // V30MZ masks the count to 5 bits before shifting (WSCpuTest)
+    dbg_shift_cnt = cnt;
     if kind <= 3 && cpu_mz && cnt == 0 {
         // V30MZ (per WSCpuTest): a rotate whose count is a multiple of 32
         // leaves the operand and CF untouched but still recomputes OF.
@@ -750,6 +845,7 @@ fn exec_one() -> bool {
         op = fetch8();
     }
     dbg_op = op;
+    d_valid = false; dbg_taken = false; dbg_back = false; dbg_odd = false; dbg_shift_cnt = 0;
     // 8086 decoder aliases: 60-6F execute as Jcc (70-7F); C0/C1/C8/C9 as C2/C3/CA/CB.
     if !cpu_v20 {
         if op >= 0x60 && op <= 0x6F { op = op + 0x10; }
@@ -938,7 +1034,7 @@ fn exec_one() -> bool {
         return false; }
     if op == 0x8C { decode_modrm(); write_rm(true, seg[d_reg & 3] as i64); return true; }  // MOV Ev,seg
     if op == 0x8E { decode_modrm(); let v = read_rm(true); seg[d_reg & 3] = v as! u16; return true; }  // MOV seg,Ev
-    if op >= 0x70 && op <= 0x7F { let d = disp8s(); if cond(op & 0xF) { rel_jump(d); } return true; }  // Jcc rel8
+    if op >= 0x70 && op <= 0x7F { let d = disp8s(); if cond(op & 0xF) { dbg_taken = true; dbg_back = d < 0; rel_jump(d); } return true; }  // Jcc rel8
     if op == 0xEB { rel_jump(disp8s()); return true; }  // JMP rel8
     if op == 0xE9 { rel_jump(disp16s()); return true; }  // JMP rel16
     if op == 0xE8 { let d = disp16s(); push16(ip as i64); rel_jump(d); return true; }  // CALL rel16
@@ -958,6 +1054,7 @@ fn exec_one() -> bool {
             else if op == 0xE1 { take = r[1] != 0 && ((flags as i64 >> 6) & 1) == 1; }
             else { take = r[1] != 0 && ((flags as i64 >> 6) & 1) == 0; }
         }
+        dbg_taken = take; dbg_back = d < 0;
         if take { rel_jump(d); }
         return true;
     }
@@ -1147,6 +1244,7 @@ fn run_ws(path: u8[:]) {
     var menu_idx: i64 = 0;
     let argv2 = args();
     var survey: bool = false;
+    var page_target: i64 = 0;
     if argv2.len > 3 {
         let a3 = argv2[3];
         if a3.len > 0 && a3[a3.len - 1] == 43 { survey = true; }
@@ -1158,6 +1256,7 @@ fn run_ws(path: u8[:]) {
         else if a3 == "div" || a3 == "div+" { menu_idx = 6; }
         else if a3 == "sdiv" || a3 == "sdiv+" { menu_idx = 7; }
         else if a3.len == 2 && a3[0] == 109 { menu_idx = (a3[1] as i64) - 48; }  // "m1".."m9": generic menu index (WSHWTest)
+        else if a3.len >= 3 && a3[0] == 112 && a3[1] == 103 { page_target = (a3[2] as i64) - 48; if a3.len >= 4 { page_target = page_target * 10 + ((a3[3] as i64) - 48); } }  // "pgN": WSTimingTest page index
     }
     var skips: i64 = 0;
     var skip_hold: i64 = 0;
@@ -1165,6 +1264,8 @@ fn run_ws(path: u8[:]) {
     var done: bool = false;
     var prev_keys: i64 = 0;
     var dismiss: i64 = 0;
+    var page_done: i64 = 0;
+    var page_hold: i64 = 0;
     while frame < 2000000 && !done {
         keys_state = 0;
         if skip_hold > 0 { keys_state = 1 << 11; skip_hold -= 1; }
@@ -1178,15 +1279,18 @@ fn run_ws(path: u8[:]) {
             }
         } else if frame >= 30 && frame < 45 { keys_state = 1 << 10; }  // hold A to pick "Test All"
         if dismiss > 0 { keys_state |= 1 << 10; dismiss -= 1; }  // auto-tap A to dismiss "press any key" HLT waits
+        if page_hold > 0 { keys_state |= 1 << 5; page_hold -= 1; }  // WSTimingTest: X2 (right) advances the page
         if keys_state != 0 && prev_keys == 0 { int_cause |= 0x02 & (io_ports[0xB2] as i64); }  // KEY_PRESS cause latches on the press edge, only when enabled
         prev_keys = keys_state;
         var spent: i64 = 0;
         while spent < 40704 {
             ws_deliver_int();
-            if (flags & 0x0100) != 0 && dbg_op != 0x9D && dbg_op != 0xCF { do_int(1); }  // TF single-step trap
+            if (flags & 0x0100) != 0 && dbg_op != 0x9D && dbg_op != 0xCF { do_int(1); ws_cycles += 33; spent += 33; }  // TF single-step trap (entry charge fitted from WSTimingTest's trap case)
             if !cpu_halted {
                 let pre_cx: i64 = r[1] as i64;
-                if !exec_one() { print("unsupported opcode ", dbg_op, " at cs:ip ", seg[1], ":", dbg_ip, " frame ", frame); let m = ws_screen_text(screen); write_stdout(screen[..m]); exit(1); }
+                fault_chg = 0; cyc_in_exec = true;
+                let okc: bool = exec_one(); cyc_in_exec = false;
+                if !okc { print("unsupported opcode ", dbg_op, " at cs:ip ", seg[1], ":", dbg_ip, " frame ", frame); let m = ws_screen_text(screen); write_stdout(screen[..m]); exit(1); }
                 total += 1;
                 let c: i64 = est_cycles(pre_cx);
                 ws_cycles += c; spent += c;
@@ -1198,6 +1302,7 @@ fn run_ws(path: u8[:]) {
         if same { for i in n { if screen[i] != last[i] { same = false; } } }
         if same { frozen += 1; } else { frozen = 0; for i in n { last[i] = screen[i]; } lastn = n; }
         if frozen == 200 && cpu_halted { dismiss = 6; }
+        if page_target > 0 && frame > 60 && frozen == 90 && page_done < page_target { page_done += 1; page_hold = 4; frozen = 0; for i in n { last[i] = 0; } lastn = 0; }
         if survey && frozen >= 90 && skips < 40 { skips += 1; print("survey skip ", skips, " at frame ", frame, " after ", total, " instructions; screen was:"); write_stdout(screen[..n]); skip_hold = 6; frozen = 0; for i in n { last[i] = 0; } lastn = 0; }
         else if frozen >= 600 { print("screen frozen for 600 frames at frame ", frame, " after ", total, " instructions (waiting for a key: end of Test All or a failure stop)"); done = true; }
         else if frame % 2000 == 0 { print("frame ", frame, " oks=", count_ok(screen, n)); write_stdout(screen[..n]); }

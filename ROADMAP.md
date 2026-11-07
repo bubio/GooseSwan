@@ -45,8 +45,12 @@ and the next step recorded in the session notes.
 - Done when: WSHWTest's display/timing checks pass.
 - Status 2026-11-07: the timing foundation landed first — a cycle
   estimator drives the scanline model (159 lines × 256 cycles), the
-  current-line port and the frame loop. WSTimingTest page 1 passes
-  16/17 (the miss is the prefetch-alignment "Unaligned" case).
+  current-line port and the frame loop. The estimator is now
+  form-aware (EA premiums, loop-tail/prefetch rules, saturating
+  shifts, value-dependent MUL/DIV, REP per-element costs, fault
+  partials) and WSTimingTest passes 398/406 cases across all 29
+  pages; the 8 misses are documented (two need a serial TX timing
+  model, the rest are sub-line quantization/data-dependent edges).
   Rendering itself has not started.
 
 ## M4 — Peripherals (in progress)
