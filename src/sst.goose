@@ -257,6 +257,37 @@ fn trunc_divmod(a: i64, b: i64) -> i64, i64 {
     return q, a - q * b;
 }
 
+
+fn str_step(op: i64) {
+    let size16: bool = (op & 1) == 1;
+    let step: i64 = if size16 { 2 } else { 1 };
+    let delta: i64 = if (flags & 0x0400) != 0 { 0 - step } else { step };
+    let sbase: i64 = src_seg_base(3);              // DS, override-aware
+    let dbase: i64 = (seg[0] as i64) << 4;         // ES is never overridden
+    if op == 0xA4 || op == 0xA5 {  // MOVS
+        if size16 { seg_wr16(dbase, r[7] as i64, seg_rd16(sbase, r[6] as i64)); } else { wb8((dbase + (r[7] as i64)) & 0xFFFFF, mem[(sbase + (r[6] as i64)) & 0xFFFFF]); }
+        r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
+        r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
+    } else if op == 0xA6 || op == 0xA7 {  // CMPS
+        let a: i64 = if size16 { seg_rd16(sbase, r[6] as i64) as i64 } else { mem[(sbase + (r[6] as i64)) & 0xFFFFF] as i64 };
+        let b: i64 = if size16 { seg_rd16(dbase, r[7] as i64) as i64 } else { mem[(dbase + (r[7] as i64)) & 0xFFFFF] as i64 };
+        alu_op(5, a, b, if size16 { 16 } else { 8 });
+        r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
+        r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
+    } else if op == 0xAA || op == 0xAB {  // STOS
+        if size16 { seg_wr16(dbase, r[7] as i64, r[0]); } else { wb8((dbase + (r[7] as i64)) & 0xFFFFF, get_r8(0)); }
+        r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
+    } else if op == 0xAC || op == 0xAD {  // LODS
+        if size16 { r[0] = seg_rd16(sbase, r[6] as i64); } else { set_r8(0, mem[(sbase + (r[6] as i64)) & 0xFFFFF]); }
+        r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
+    } else {  // SCAS (AE/AF)
+        let b: i64 = if size16 { seg_rd16(dbase, r[7] as i64) as i64 } else { mem[(dbase + (r[7] as i64)) & 0xFFFFF] as i64 };
+        let a: i64 = if size16 { r[0] as i64 } else { get_r8(0) as i64 };
+        alu_op(5, a, b, if size16 { 16 } else { 8 });
+        r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
+    }
+}
+
 // ---- Instruction slice ----
 fn exec_one() -> bool {
     seg_override = -1;
@@ -319,6 +350,22 @@ fn exec_one() -> bool {
     if op == 0x06 || op == 0x0E || op == 0x16 || op == 0x1E { push16(seg[(op >> 3) & 3] as i64); return true; }  // PUSH seg
     if op == 0x07 || op == 0x0F || op == 0x17 || op == 0x1F { let v = pop16(); seg[(op >> 3) & 3] = v as! u16; return true; }  // POP seg (0F = POP CS, 8086 only)
     if op == 0x8F { decode_modrm(); let v = pop16(); write_rm(true, v); return true; }  // POP Ev
+    if op >= 0xA4 && op <= 0xAF && op != 0xA8 && op != 0xA9 {  // string operations
+        let is_cmp: bool = op == 0xA6 || op == 0xA7 || op == 0xAE || op == 0xAF;
+        if rep_prefix == 0 { str_step(op); }
+        else {
+            while r[1] != 0 {
+                str_step(op);
+                r[1] = r[1] - 1;
+                if is_cmp {
+                    let zf: i64 = (flags >> 6) & 1;
+                    if rep_prefix == 3 && zf == 0 { break; }
+                    if rep_prefix == 2 && zf == 1 { break; }
+                }
+            }
+        }
+        return true;
+    }
     if op == 0x8D { decode_modrm(); r[d_reg] = d_off as! u16; return true; }  // LEA
     if op == 0xC4 { decode_modrm(); if d_isreg { return false; } let lo = seg_rd16(d_segbase, d_off); let hi = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); r[d_reg] = lo; seg[0] = hi; return true; }  // LES
     if op == 0xC5 { decode_modrm(); if d_isreg { return false; } let lo = seg_rd16(d_segbase, d_off); let hi = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); r[d_reg] = lo; seg[3] = hi; return true; }  // LDS

@@ -11,9 +11,11 @@ and the next step recorded in the session notes.
 - Done when: the harness runs a real 8086 case file and reports pass/fail counts.
 - Result: 28,000 cases passing (MOV + ADD slice). See docs/sessions/2026-11-07-m0.md.
 
-## M1 — CPU complete
+## M1 — CPU complete (in progress)
 - All documented 8086 instructions pass the SingleStepTests 8086 corpus.
-- V20/V30 corpora for the NEC differences.
+  Status 2026-11-07: 634,406 / 646,000 cases (98.21%); the only failures are
+  documented-undefined flag residue after DIV/IDIV/IMUL and AAM base 0.
+- V20/V30 corpora for the NEC differences. ← next
 - Done when: WSCpuTest agrees (V30MZ-specific behaviour flushed out).
 
 ## M2 — Bus and cartridge
