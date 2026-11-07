@@ -97,6 +97,8 @@ fn port_wr(p: i64, v: i64) {
     else if p == 0xA7 { io_ports[0xAB] = v as! u8; }
     if p == 0x8E && (v & 0x08) != 0 { lfsr = 0; noise_acc = 0; io_ports[0x8E] = (v & 0xF7) as! u8; }  // SND_NOISE_CTRL reset: reseed LFSR, bit self-clears
     if p == 0x8C || p == 0x8D { sweep_ctr = 0; sweep_step = 0; }  // sweep register writes reset the sweep timer
+    if !ws_mono_cart && p >= 0x64 && p <= 0x67 { io_ports[0x69] = 0; }  // HyperVoice direct write clears the data latch (colour only)
+    if !ws_mono_cart && p == 0x69 { io_ports[0x64] = 0; io_ports[0x65] = 0; io_ports[0x66] = 0; io_ports[0x67] = 0; }  // HyperVoice data write clears the direct words
     if p == 0xB3 { io_ports[0xB3] = (v & 0xC4) as! u8; }  // SERIAL_CTRL: only enable/speed/overrun bits exist
     if p == 0xB1 || p == 0xB2 || p == 0xB3 { refresh_serial(); }  // serial TX-ready level feeds INT_CAUSE bit 0
     if p == 0x48 && (v & 0x80) != 0 { run_gdma(); }  // GDMA trigger: synchronous burst on the enable write
@@ -170,10 +172,68 @@ fn run_gdma() {
     if moved > 0 { ws_cycles += 5 + moved; }
 }
 
+// ---- Sound DMA (colour only): feeds the voice data latch (port 0x89)
+// from memory on the 24 kHz cadence (one sample per 128 CPU cycles x
+// the rate divider), following Swanium's bus model. The register
+// shadows live in ports 0x4A-0x52; source/counter latch into the
+// engine (with shadows for REPEAT) when a stopped engine first ticks
+// with ENABLE set, and are written back to the ports on every step.
+var sdma_running: bool = false;
+var sdma_clock: i64 = 0;
+var sdma_source: i64 = 0;
+var sdma_counter: i64 = 0;
+var sdma_source_shadow: i64 = 0;
+var sdma_counter_shadow: i64 = 0;
+
+fn sdma_source_from_ports() -> i64 { (((io_ports[0x4C] as i64) & 0x0F) << 16) | (io_ports[0x4A] as i64) | ((io_ports[0x4B] as i64) << 8) }
+fn sdma_counter_from_ports() -> i64 { (((io_ports[0x50] as i64) & 0x0F) << 16) | (io_ports[0x4E] as i64) | ((io_ports[0x4F] as i64) << 8) }
+
+fn sdma_writeback() {
+    io_ports[0x4A] = (sdma_source & 0xFF) as! u8; io_ports[0x4B] = ((sdma_source >> 8) & 0xFF) as! u8; io_ports[0x4C] = ((sdma_source >> 16) & 0x0F) as! u8;
+    io_ports[0x4E] = (sdma_counter & 0xFF) as! u8; io_ports[0x4F] = ((sdma_counter >> 8) & 0xFF) as! u8; io_ports[0x50] = ((sdma_counter >> 16) & 0x0F) as! u8;
+}
+
+fn sdma_step() {
+    let ctrl: i64 = io_ports[0x52] as i64;
+    if (ctrl & 0x04) != 0 { io_ports[0x89] = 0; return; }  // HOLD: latch silence, pointers stay
+    io_ports[0x89] = rd8(sdma_source);
+    if (ctrl & 0x40) != 0 { sdma_source = (sdma_source - 1) & 0xFFFFF; } else { sdma_source = (sdma_source + 1) & 0xFFFFF; }
+    sdma_counter = (sdma_counter - 1) & 0xFFFFF;
+    if sdma_counter == 0 {
+        if (ctrl & 0x08) != 0 { sdma_source = sdma_source_shadow; sdma_counter = sdma_counter_shadow; }
+        else { io_ports[0x52] = ((io_ports[0x52] as i64) & 0x7F) as! u8; sdma_running = false; }
+    }
+    sdma_writeback();
+}
+
+fn sdma_tick(dc: i64) {
+    if ws_mono_cart || ((io_ports[0x52] as i64) & 0x80) == 0 { sdma_running = false; sdma_clock = 0; return; }
+    if !sdma_running {
+        let counter: i64 = sdma_counter_from_ports();
+        if counter == 0 { io_ports[0x52] = ((io_ports[0x52] as i64) & 0x7F) as! u8; return; }  // nothing to send: ENABLE self-clears
+        sdma_source = sdma_source_from_ports();
+        sdma_counter = counter;
+        sdma_source_shadow = sdma_source;
+        sdma_counter_shadow = sdma_counter;
+        sdma_clock = 0;
+        sdma_running = true;
+    }
+    sdma_clock += dc;
+    let rate_bits: i64 = (io_ports[0x52] as i64) & 3;
+    let rate: i64 = if rate_bits == 0 { 6 } else if rate_bits == 1 { 4 } else if rate_bits == 2 { 2 } else { 1 };
+    let period: i64 = 128 * rate;
+    while sdma_clock >= period {
+        sdma_clock -= period;
+        sdma_step();
+        if !sdma_running { sdma_clock = 0; break; }
+    }
+}
+
 fn ws_line_events() {
     let apu_dc: i64 = ws_cycles - last_tick;
     noise_tick(apu_dc);
     apu_tick(apu_dc);
+    sdma_tick(apu_dc);
     last_tick = ws_cycles;
     let line: i64 = (ws_cycles % 40704) / 256;
     while last_line != line {

@@ -75,7 +75,8 @@ and the next step recorded in the session notes.
   serial cases — the harvest is 400/407 with only the documented
   quantisation/data-dependent edges left. One correction from
   that slice: GDMA raises no interrupt (bit 3 is SERIAL_RECEIVE).
-  Remaining: Sound DMA + HyperVoice, cartridge EEPROM, serial
+  Sound DMA + HyperVoice landed 2026-11-08 (Swanium-modelled,
+  `sst apu_test` 68/68). Remaining: cartridge EEPROM, serial
   byte protocol; the audible sample stream arrives with the M5
   frontend.
 

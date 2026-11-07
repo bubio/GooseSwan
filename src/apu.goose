@@ -135,6 +135,39 @@ fn apu_out_port(p: i64) -> i64 {
 var apu_pass: i64 = 0;
 var apu_fail: i64 = 0;
 
+// ---- HyperVoice (colour only): the 8-bit data latch (port 0x69) or
+// the signed 16-bit direct words (ports 0x64-0x67) as an extra PCM
+// source, following Swanium's apu model (after Mednafen). The sample
+// expansion is CPU-invisible today — the audible mix lands with the
+// M5 frontend — but the maths is pinned here by Swanium's own test
+// vectors in apu_test.
+fn hv_sample(ctrl: i64, data: i64) -> i64 {
+    let shift: i64 = ctrl & 3;
+    let mode: i64 = ctrl & 0x0C;
+    var expanded: i64 = 0;
+    if mode == 0 { expanded = data << (8 - shift); }
+    else if mode == 4 { expanded = (data - 256) << (8 - shift); }
+    else if mode == 8 { expanded = s8(data) << (8 - shift); }
+    else { expanded = data << 8; }
+    var t: i64 = expanded;
+    if t > 32767 { t -= 65536; }
+    if t < -32768 { t += 65536; }
+    return t >> 5;
+}
+
+fn hv_output() -> i64, i64 {
+    let ctrl: i64 = io_ports[0x6A] as i64;
+    if ws_mono_cart || !ppu_color_mode() || (ctrl & 0x80) == 0 { return 0, 0; }
+    let dl: i64 = s16((io_ports[0x64] as i64) | ((io_ports[0x65] as i64) << 8));
+    let dr: i64 = s16((io_ports[0x66] as i64) | ((io_ports[0x67] as i64) << 8));
+    if dl != 0 || dr != 0 { return dl, dr; }
+    let s: i64 = hv_sample(ctrl, io_ports[0x69] as i64) * 32;
+    let chan: i64 = io_ports[0x6B] as i64;
+    let l: i64 = if (chan & 0x40) != 0 { s } else { 0 };
+    let r: i64 = if (chan & 0x20) != 0 { s } else { 0 };
+    return l, r;
+}
+
 fn apu_check(name: u8[:], got: i64, exp: i64) {
     if got == exp { apu_pass += 1; } else { apu_fail += 1; print("APU FAIL ", name, ": got ", got, ", expected ", exp); }
 }
@@ -144,6 +177,7 @@ fn apu_reset_state() {
     for i in 256 { io_ports[i] = 0; }
     for ch in 4 { ch_period[ch] = 0; ch_idx[ch] = 0; ch_sample[ch] = 0; }
     sweep_ctr = 0; sweep_step = 0; fast_primed = false;
+    sdma_running = false; sdma_clock = 0;
     lfsr = 0; noise_acc = 0; int_cause = 0; ws_cycles = 0;
     init_io_masks();
 }
@@ -268,5 +302,95 @@ fn apu_test() {
     port_wr(0xB3, 0xC0);
     port_wr(0xB2, 0x01);
     apu_check("serial no latch on colour carts", int_cause & 1, 0);
+    // Sound DMA (colour): cadence, writeback, decrement, repeat, hold
+    ws_mono_cart = false;
+    apu_reset_state();
+    mem[0x2000] = 0x11; mem[0x2001] = 0x22; mem[0x2002] = 0x33;
+    port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x4C, 0x00);
+    port_wr(0x4E, 0x03); port_wr(0x4F, 0x00); port_wr(0x50, 0x00);
+    port_wr(0x52, 0x83);
+    sdma_tick(127);
+    apu_check("sdma waits for period", io_ports[0x89] as i64, 0);
+    sdma_tick(1);
+    apu_check("sdma byte 0", io_ports[0x89] as i64, 0x11);
+    apu_check("sdma source writeback", (io_ports[0x4A] as i64) | ((io_ports[0x4B] as i64) << 8), 0x2001);
+    apu_check("sdma counter writeback", io_ports[0x4E] as i64, 2);
+    sdma_tick(128);
+    apu_check("sdma byte 1", io_ports[0x89] as i64, 0x22);
+    sdma_tick(128);
+    apu_check("sdma byte 2", io_ports[0x89] as i64, 0x33);
+    apu_check("sdma enable self-clears", (io_ports[0x52] as i64) & 0x80, 0);
+    apu_reset_state();
+    mem[0x2000] = 0x77;
+    port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x4E, 0x01); port_wr(0x52, 0x80);
+    sdma_tick(767);
+    apu_check("sdma rate0 waits", io_ports[0x89] as i64, 0);
+    sdma_tick(1);
+    apu_check("sdma rate0 byte", io_ports[0x89] as i64, 0x77);
+    apu_reset_state();
+    mem[0x2000] = 0x11; mem[0x2001] = 0x22; mem[0x2002] = 0x33;
+    port_wr(0x4A, 0x02); port_wr(0x4B, 0x20); port_wr(0x4E, 0x02); port_wr(0x52, 0xC3);
+    sdma_tick(128);
+    apu_check("sdma decrement byte 0", io_ports[0x89] as i64, 0x33);
+    sdma_tick(128);
+    apu_check("sdma decrement byte 1", io_ports[0x89] as i64, 0x22);
+    apu_check("sdma decrement source", (io_ports[0x4A] as i64) | ((io_ports[0x4B] as i64) << 8), 0x2000);
+    apu_reset_state();
+    mem[0x2000] = 0x11; mem[0x2001] = 0x22;
+    port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x4E, 0x02); port_wr(0x52, 0x8B);
+    sdma_tick(128); sdma_tick(128);
+    apu_check("sdma repeat counter restored", io_ports[0x4E] as i64, 2);
+    apu_check("sdma repeat stays enabled", (io_ports[0x52] as i64) & 0x80, 0x80);
+    sdma_tick(128);
+    apu_check("sdma repeat first byte again", io_ports[0x89] as i64, 0x11);
+    apu_reset_state();
+    mem[0x2000] = 0x11;
+    io_ports[0x89] = 0x99;
+    port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x4E, 0x02); port_wr(0x52, 0x87);
+    sdma_tick(128);
+    apu_check("sdma hold latches zero", io_ports[0x89] as i64, 0);
+    apu_check("sdma hold counter stays", io_ports[0x4E] as i64, 2);
+    apu_reset_state();
+    port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x52, 0x83);
+    sdma_tick(256);
+    apu_check("sdma zero counter clears enable", (io_ports[0x52] as i64) & 0x80, 0);
+    ws_mono_cart = true;
+    apu_reset_state();
+    mem[0x2000] = 0x11;
+    port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x4E, 0x01); port_wr(0x52, 0x83);
+    sdma_tick(256);
+    apu_check("sdma silent on mono carts", io_ports[0x89] as i64, 0);
+    ws_mono_cart = false;
+    // HyperVoice port semantics and sample maths (Swanium's vectors)
+    apu_reset_state();
+    port_wr(0x64, 0xAA); port_wr(0x65, 0xBB);
+    apu_check("hv direct stored", io_ports[0x64] as i64, 0xAA);
+    port_wr(0x69, 0x55);
+    apu_check("hv data stored", io_ports[0x69] as i64, 0x55);
+    apu_check("hv data write clears direct", io_ports[0x64] as i64, 0);
+    port_wr(0x66, 0xCC);
+    apu_check("hv direct write clears data", io_ports[0x69] as i64, 0);
+    apu_check("hv direct R stored", io_ports[0x66] as i64, 0xCC);
+    apu_check("hv sample unsigned", hv_sample(0x00, 0x40), 512);
+    apu_check("hv sample signed", hv_sample(0x08, 0x80), -1024);
+    apu_check("hv sample shift", hv_sample(0x01, 0x40), 256);
+    apu_check("hv sample negated wraps", hv_sample(0x04, 0x40), 512);
+    apu_reset_state();
+    io_ports[0x60] = 0x80;
+    io_ports[0x6A] = 0x80; io_ports[0x69] = 0x40; io_ports[0x6B] = 0x40;
+    let hl, hr = hv_output();
+    apu_check("hv out left only", hl, 16384);
+    apu_check("hv out right silent", hr, 0);
+    io_ports[0x64] = 0x34; io_ports[0x65] = 0x12; io_ports[0x66] = 0xCC; io_ports[0x67] = 0xED;
+    let dl, dr = hv_output();
+    apu_check("hv direct out L", dl, 0x1234);
+    apu_check("hv direct out R", dr, -0x1234);
+    io_ports[0x6A] = 0x00;
+    let zl, zr = hv_output();
+    apu_check("hv disabled silent", zl + zr, 0);
+    io_ports[0x6A] = 0xF0; io_ports[0x64] = 0; io_ports[0x65] = 0; io_ports[0x66] = 0; io_ports[0x67] = 0; io_ports[0x6B] = 0x60;
+    let sl, sr = hv_output();
+    apu_check("hv speed bits ignored L", sl, 16384);
+    apu_check("hv speed bits ignored R", sr, 16384);
     print("apu_test: ", apu_pass, " passed, ", apu_fail, " failed");
 }
