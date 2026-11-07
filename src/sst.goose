@@ -13,20 +13,96 @@ var seg: u16[4] = [0; 4];    // es cs ss ds
 var ip: u16 = 0;
 var flags: u16 = 0;
 
+// ---- WonderSwan machine mode (selected by the "ws" CLI argument) ----
+// The SST harness keeps using the flat 1 MB array; in WS mode the physical
+// address goes through the WonderSwan memory map instead: 64 KB internal
+// RAM, a cartridge SRAM window, two banked ROM windows and the linear ROM
+// window, all with (bank << 16 | offset) % rom_size addressing, matching
+// Swanium's bus. Internal RAM stays in mem[0..0x10000) so the screen map
+// and variables can be read back directly by the runner.
+var ws_mode: bool = false;
+var rom: u8[>..] = [];
+var sram: u8[65536] = [0; 65536];
+var bk_ram: i64 = 0xFF;    // port C1
+var bk_rom0: i64 = 0xFF;   // port C2
+var bk_rom1: i64 = 0xFF;   // port C3
+var bk_linear: i64 = 0;    // port C0
+var io_ports: u8[256] = [0; 256];
+var int_cause: i64 = 0;
+var key_select: i64 = 0;
+var keys_state: i64 = 0;   // Y1-4 bits 0-3, X1-4 bits 4-7, Start bit 9, A bit 10, B bit 11
+var cpu_halted: bool = false;
+
+fn rd8(p: i64) -> u8 {
+    if !ws_mode { return mem[p]; }
+    if p < 0x10000 { return mem[p]; }
+    if p < 0x20000 { return sram[(((bk_ram << 16) | (p & 0xFFFF)) % 65536) as i64]; }
+    if rom.len == 0 { return 0xFF; }
+    if p < 0x30000 { return rom[(((bk_rom0 << 16) | (p & 0xFFFF)) % rom.len) as i64]; }
+    if p < 0x40000 { return rom[(((bk_rom1 << 16) | (p & 0xFFFF)) % rom.len) as i64]; }
+    return rom[(((bk_linear << 20) | (p & 0xFFFFF)) % rom.len) as i64];
+}
+
+fn port_rd(p: i64) -> i64 {
+    if p == 0xA0 { return 0x02; }  // SYSTEM_CTRL1: colour-capable hardware (drives the SPHINX flag variants in test ROMs)
+    if p == 0xB4 { return int_cause; }  // INT_CAUSE
+    if p == 0xB5 {  // KEYPAD: selector echoed back, selected scan groups OR-ed into the low nibble
+        var v: i64 = key_select;
+        if (key_select & 0x10) != 0 { v |= keys_state & 0x0F; }
+        if (key_select & 0x20) != 0 { v |= (keys_state >> 4) & 0x0F; }
+        if (key_select & 0x40) != 0 { v |= (keys_state >> 8) & 0x0F; }
+        return v;
+    }
+    if p == 0xC0 { return bk_linear; }
+    if p == 0xC1 { return bk_ram; }
+    if p == 0xC2 { return bk_rom0; }
+    if p == 0xC3 { return bk_rom1; }
+    return io_ports[p] as i64;
+}
+fn port_wr(p: i64, v: i64) {
+    io_ports[p] = v as! u8;
+    if p == 0xB5 { key_select = v; }
+    else if p == 0xB6 { int_cause = int_cause & ~v; }  // INT_CAUSE_CLEAR
+    else if p == 0xC0 { bk_linear = v & 0x3F; }
+    else if p == 0xC1 { bk_ram = v; }
+    else if p == 0xC2 { bk_rom0 = v; }
+    else if p == 0xC3 { bk_rom1 = v; }
+}
+
+// Deliver the highest-priority pending hardware interrupt, if any is
+// enabled and IF is set. Cause bits stay set until software clears them
+// through port B6, as on hardware.
+fn ws_deliver_int() {
+    let pending: i64 = int_cause & (io_ports[0xB2] as i64);
+    if pending == 0 { return; }
+    if (flags & 0x0200) == 0 { return; }
+    var bit: i64 = 7;
+    while bit > 0 && ((pending >> bit) & 1) == 0 { bit -= 1; }
+    cpu_halted = false;
+    do_int((io_ports[0xB0] as i64) + bit);
+}
+
 // Memory written during a case, so the next case can restore zeros.
 var touched: i64[>..<] = [];
 var recording: bool = false;
 
 fn phys(s: u16, off: u16) -> i64 { (((s as i64) << 4) + (off as i64)) & 0xFFFFF }
-fn rb16(p: i64) -> u16 { (mem[p] as u16) | ((mem[(p + 1) & 0xFFFFF] as u16) << 8) }
+fn rb16(p: i64) -> u16 { (rd8(p) as u16) | ((rd8((p + 1) & 0xFFFFF) as u16) << 8) }
 // Word access through a segment: the second byte wraps at the 64 KB offset
 // boundary (offset 0xFFFF is followed by offset 0x0000), as on real hardware.
-fn seg_rd16(base: i64, off: i64) -> u16 { (mem[(base + off) & 0xFFFFF] as u16) | ((mem[(base + ((off + 1) & 0xFFFF)) & 0xFFFFF] as u16) << 8) }
+fn seg_rd16(base: i64, off: i64) -> u16 { (rd8((base + off) & 0xFFFFF) as u16) | ((rd8((base + ((off + 1) & 0xFFFF)) & 0xFFFFF) as u16) << 8) }
 fn seg_wr16(base: i64, off: i64, v: u16) { wb8((base + off) & 0xFFFFF, v as! u8); wb8((base + ((off + 1) & 0xFFFF)) & 0xFFFFF, (v >> 8) as! u8); }
-fn wb8(p: i64, v: u8) { mem[p] = v; if recording { touched.push(p); } }
+fn wb8(p: i64, v: u8) {
+    if ws_mode {
+        if p < 0x10000 { mem[p] = v; }
+        else if p < 0x20000 { sram[(((bk_ram << 16) | (p & 0xFFFF)) % 65536) as i64] = v; }
+        return;  // writes into the ROM windows are ignored
+    }
+    mem[p] = v; if recording { touched.push(p); }
+}
 fn wb16(p: i64, v: u16) { wb8(p, v as! u8); wb8((p + 1) & 0xFFFFF, (v >> 8) as! u8); }
 
-fn fetch8() -> u8 { let v = mem[phys(seg[1], ip)]; ip = ip + 1; v }
+fn fetch8() -> u8 { let v = rd8(phys(seg[1], ip)); ip = ip + 1; v }
 fn fetch16() -> u16 { let lo = fetch8(); let hi = fetch8(); ((hi as u16) << 8) | (lo as u16) }
 
 fn get_r8(i: i64) -> u8 {
@@ -41,6 +117,9 @@ fn set_r8(i: i64, v: u8) {
 var seg_override: i64 = -1;  // segment override prefix, -1 = none
 var rep_prefix: i64 = 0;  // 0 = none, 2 = REPNE (F2), 3 = REP/REPE (F3), 4 = V20 rep-while-CF=0 (64), 5 = V20 rep-while-CF=1 (65)
 var cpu_v20: bool = false;  // NEC V20 profile, selected by the "v20" CLI argument
+var cpu_mz: bool = false;   // V30MZ deltas on top of the V20 profile (WSCpuTest authority), set by the WS runner
+var dbg_op: i64 = 0;        // last opcode byte executed (after prefixes), for runner diagnostics
+var dbg_ip: i64 = 0;        // ip at which it started
 var d_reg: i64 = 0;
 var d_isreg: bool = false;
 var d_regidx: i64 = 0;
@@ -53,7 +132,24 @@ fn decode_modrm() {
     let mod: i64 = m >> 6;
     d_reg = (m >> 3) & 7;
     let rm: i64 = m & 7;
-    if mod == 3 { d_isreg = true; d_regidx = rm; d_off = 0; d_segbase = 0; return; }
+    if mod == 3 { d_isreg = true; d_regidx = rm; d_off = 0; d_segbase = 0;
+        if cpu_mz {
+            // V30MZ quirk (WSCpuTest): with mod=3 the EA adder still runs,
+            // fed with the form's first register and the rm register itself
+            // (LEA DX,[BX+AX] = BX+AX; LES with mod=3 reads at that EA).
+            // Form-first registers by rm: BX,BX,BP,BP,SI,DI,BP,BX.
+            var ff: i64 = 3;
+            if rm == 2 || rm == 3 || rm == 6 { ff = 5; }
+            else if rm == 4 { ff = 6; }
+            else if rm == 5 { ff = 7; }
+            else if rm == 7 { ff = 3; }
+            d_off = ((r[ff] as i64) + (r[rm] as i64)) & 0xFFFF;
+            var msidx: i64 = if rm == 2 || rm == 3 || rm == 6 { 2 } else { 3 };
+            if seg_override >= 0 { msidx = seg_override; }
+            d_segbase = (seg[msidx] as i64) << 4;
+            d_addr = (d_segbase + d_off) & 0xFFFFF;
+        }
+        return; }
     d_isreg = false;
     var base: i64 = 0;
     var sidx: i64 = 3;  // DS by default
@@ -80,7 +176,7 @@ fn decode_modrm() {
 
 fn read_rm(size16: bool) -> i64 {
     if d_isreg { if size16 { r[d_regidx] as i64 } else { get_r8(d_regidx) as i64 } }
-    else if size16 { seg_rd16(d_segbase, d_off) as i64 } else { mem[d_addr] as i64 }
+    else if size16 { seg_rd16(d_segbase, d_off) as i64 } else { rd8(d_addr) as i64 }
 }
 fn write_rm(size16: bool, v: i64) {
     if d_isreg {
@@ -192,13 +288,39 @@ fn set_szp(res: i64, bits: i64) {
 fn shift_op(kind: i64, v: i64, count: i64, bits: i64) -> i64 {
     // kind: 0 ROL, 1 ROR, 2 RCL, 3 RCR, 4 SHL, 5 SHR, 7 SAR (6 is SETMO, handled by the caller)
     // On this CPU the flags behave as if latched from the final 1-bit step.
-    if count == 0 { return v; }
+    var cnt: i64 = count;
+    if cpu_mz { cnt = cnt & 0x1F; }  // V30MZ masks the count to 5 bits before shifting (WSCpuTest)
+    if kind <= 3 && cpu_mz && cnt == 0 {
+        // V30MZ (per WSCpuTest): a rotate whose count is a multiple of 32
+        // leaves the operand and CF untouched but still recomputes OF.
+        let msbz = (v >> (bits - 1)) & 1;
+        var ofz: i64 = 0;
+        if kind == 0 || kind == 2 { ofz = ((flags as i64) & 1) ^ msbz; } else { ofz = msbz ^ ((v >> (bits - 2)) & 1); }
+        var fz: i64 = (flags as i64) & 0xF7FF;
+        if ofz == 1 { fz |= 0x0800; }
+        flags = fz as! u16;
+        return v;
+    }
+    if cnt == 0 && !(cpu_mz && kind >= 4) { return v; }
     let mask: i64 = if bits == 16 { 0xFFFF } else { 0xFF };
     let top: i64 = bits - 1;
+    if cnt == 0 {
+        // V30MZ: a shift whose masked count is 0 keeps the operand and
+        // CF, latches SZP from the operand, clears AF, and recomputes OF
+        // with the one-bit formula (MSB XOR CF for SHL) (WSCpuTest).
+        var f0: i64 = (flags as i64) & 0xF72B;
+        if parity_even(v & 0xFF) { f0 |= 0x0004; }
+        if v == 0 { f0 |= 0x0040; }
+        if (v & (1 << top)) != 0 { f0 |= 0x0080; }
+        if kind == 4 { if (((v >> top) & 1) ^ ((flags as i64) & 1)) == 1 { f0 |= 0x0800; } }
+        else if kind == 5 || kind == 7 { if (((v >> top) & 1) ^ ((v >> (top - 1)) & 1)) == 1 { f0 |= 0x0800; } }  // SHR/SAR: OF = top two bits XORed
+        flags = f0 as! u16;
+        return v;
+    }
     var cf: i64 = (flags as i64) & 1;
     var res: i64 = v;
     if kind <= 3 {  // rotates: only CF and OF change
-        for i in count {
+        for i in cnt {
             if kind == 0 { let nb = (res >> top) & 1; res = ((res << 1) & mask) | nb; cf = nb; }
             else if kind == 1 { let nb = res & 1; res = (res >> 1) | (nb << top); cf = nb; }
             else if kind == 2 { let nb = (res >> top) & 1; res = ((res << 1) & mask) | cf; cf = nb; }
@@ -213,7 +335,7 @@ fn shift_op(kind: i64, v: i64, count: i64, bits: i64) -> i64 {
         flags = f as! u16;
         return res;
     }
-    for i in count {
+    for i in cnt {
         if kind == 4 { cf = (res >> top) & 1; res = (res << 1) & mask; }
         else if kind == 5 { cf = res & 1; res = res >> 1; }
         else { cf = res & 1; res = (res >> 1) | (res & (1 << top)); }
@@ -232,7 +354,34 @@ fn shift_op(kind: i64, v: i64, count: i64, bits: i64) -> i64 {
     flags = f as! u16;
     return res;
 }
+var unit_cfof: i64 = 0;  // V30MZ multiply/divide unit's stale CF/OF: set by MUL/IMUL, latched into FLAGS by DIV8 and by faulting DIV8/IDIV8/AAM (WSCpuTest calcs set it up with a preceding mul/imul)
+fn mz_mul_flags(ov: i64) { unit_cfof = ov; flags = (((flags as i64) & 0xF700) | (if ov != 0 { 0x0801 } else { 0 }) | 0x0042) as! u16; }
+fn mz_div_flags(cfof: i64, zf: i64) { flags = (((flags as i64) & 0xF700) | (if cfof != 0 { 0x0801 } else { 0 }) | (if zf != 0 { 0x40 } else { 0 }) | 0x02) as! u16; }
+fn divu8_err_zf(dvd: i64, dvs: i64) -> i64 {
+    if dvs == 0 { if (dvd & 0x3FC0) == 0 { return 1; } return 0; }
+    let bx: i64 = ((256 - dvs) & 0xFF) << 6;
+    var dx: i64 = dvd & 0xFFC0;
+    dx = (dx + bx) & 0xFFFF; if dx == 0 { return 1; }
+    dx = (dx + bx) & 0xFFFF; dx = (dx + bx) & 0xFFFF; if dx == 0 { return 1; }
+    return 0;
+}
+fn divu16_err_zf(dxh: i64, axv: i64, dvs: i64) -> i64 {
+    if dvs == 0 { if (dxh & 0x3FFF) == 0 && (axv & 0xC000) == 0 { return 1; } return 0; }
+    let nb: i64 = (0 - dvs) & 0xFFFF;
+    let al: i64 = ((nb & 0xFF) << 6) & 0xFF;
+    let bx: i64 = nb >> 2;
+    var ah: i64 = (axv >> 8) & 0xC0;
+    var dx: i64 = dxh;
+    var s: i64 = ah + al; var c: i64 = if s > 0xFF { 1 } else { 0 }; ah = s & 0xFF; dx = (dx + bx + c) & 0xFFFF;
+    if (((dx >> 8) & 0xFF) | (dx & 0xFF) | ah) == 0 { return 1; }
+    s = ah + al; c = if s > 0xFF { 1 } else { 0 }; ah = s & 0xFF; dx = (dx + bx + c) & 0xFFFF;
+    s = ah + al; c = if s > 0xFF { 1 } else { 0 }; ah = s & 0xFF;
+    if ah != 0 { return 0; }
+    dx = (dx + bx + c) & 0xFFFF; if dx == 0 { return 1; }
+    return 0;
+}  // V30MZ (colour): MUL/IMUL status is constant apart from CF/OF: SF=0 ZF=1 AF=0 PF=0
 fn mul_flags(high: i64, bits: i64) {
+    if cpu_mz { mz_mul_flags(if high != 0 { 1 } else { 0 }); return; }
     var f: i64 = (flags as i64) & 0xF72A;
     if high != 0 { f |= 0x0801; }  // CF and OF
     if parity_even(high & 0xFF) { f |= 0x0004; }
@@ -266,12 +415,12 @@ fn str_step(op: i64) {
     let sbase: i64 = src_seg_base(3);              // DS, override-aware
     let dbase: i64 = (seg[0] as i64) << 4;         // ES is never overridden
     if op == 0xA4 || op == 0xA5 {  // MOVS
-        if size16 { seg_wr16(dbase, r[7] as i64, seg_rd16(sbase, r[6] as i64)); } else { wb8((dbase + (r[7] as i64)) & 0xFFFFF, mem[(sbase + (r[6] as i64)) & 0xFFFFF]); }
+        if size16 { seg_wr16(dbase, r[7] as i64, seg_rd16(sbase, r[6] as i64)); } else { wb8((dbase + (r[7] as i64)) & 0xFFFFF, rd8((sbase + (r[6] as i64)) & 0xFFFFF)); }
         r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
         r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
     } else if op == 0xA6 || op == 0xA7 {  // CMPS
-        let a: i64 = if size16 { seg_rd16(sbase, r[6] as i64) as i64 } else { mem[(sbase + (r[6] as i64)) & 0xFFFFF] as i64 };
-        let b: i64 = if size16 { seg_rd16(dbase, r[7] as i64) as i64 } else { mem[(dbase + (r[7] as i64)) & 0xFFFFF] as i64 };
+        let a: i64 = if size16 { seg_rd16(sbase, r[6] as i64) as i64 } else { rd8((sbase + (r[6] as i64)) & 0xFFFFF) as i64 };
+        let b: i64 = if size16 { seg_rd16(dbase, r[7] as i64) as i64 } else { rd8((dbase + (r[7] as i64)) & 0xFFFFF) as i64 };
         alu_op(5, a, b, if size16 { 16 } else { 8 });
         r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
         r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
@@ -279,7 +428,7 @@ fn str_step(op: i64) {
         if size16 { seg_wr16(dbase, r[7] as i64, r[0]); } else { wb8((dbase + (r[7] as i64)) & 0xFFFFF, get_r8(0)); }
         r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
     } else if op == 0xAC || op == 0xAD {  // LODS
-        if size16 { r[0] = seg_rd16(sbase, r[6] as i64); } else { set_r8(0, mem[(sbase + (r[6] as i64)) & 0xFFFFF]); }
+        if size16 { r[0] = seg_rd16(sbase, r[6] as i64); } else { set_r8(0, rd8((sbase + (r[6] as i64)) & 0xFFFFF)); }
         r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
     } else if op == 0x6C || op == 0x6D {  // INS: the port value (open bus) goes to ES:DI
         if size16 { seg_wr16(dbase, r[7] as i64, 0xFFFF); } else { wb8((dbase + (r[7] as i64)) & 0xFFFFF, 0xFF); }
@@ -287,7 +436,7 @@ fn str_step(op: i64) {
     } else if op == 0x6E || op == 0x6F {  // OUTS: only the pointer moves (the port write is unobservable)
         r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
     } else {  // SCAS (AE/AF)
-        let b: i64 = if size16 { seg_rd16(dbase, r[7] as i64) as i64 } else { mem[(dbase + (r[7] as i64)) & 0xFFFFF] as i64 };
+        let b: i64 = if size16 { seg_rd16(dbase, r[7] as i64) as i64 } else { rd8((dbase + (r[7] as i64)) & 0xFFFFF) as i64 };
         let a: i64 = if size16 { r[0] as i64 } else { get_r8(0) as i64 };
         alu_op(5, a, b, if size16 { 16 } else { 8 });
         r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
@@ -333,8 +482,8 @@ fn op_bcd4(op2: i64) {
     let nb: i64 = (cnt + 1) / 2;
     var i: i64 = 0;
     while i < nb {
-        let db: i64 = mem[(dbase + ((doff + i) & 0xFFFF)) & 0xFFFFF] as i64;
-        let sb: i64 = mem[(sbase + ((soff + i) & 0xFFFF)) & 0xFFFFF] as i64;
+        let db: i64 = rd8((dbase + ((doff + i) & 0xFFFF)) & 0xFFFFF) as i64;
+        let sb: i64 = rd8((sbase + ((soff + i) & 0xFFFF)) & 0xFFFFF) as i64;
         let res, cout = bcd4_step(db, sb, carry, sub);
         if op2 != 0x26 { wb8((dbase + ((doff + i) & 0xFFFF)) & 0xFFFFF, res as! u8); }
         if res != 0 { allzero = false; }
@@ -348,7 +497,7 @@ fn op_bcd4(op2: i64) {
 }
 
 fn str_digit(base: i64, off: i64, i: i64) -> i64 {
-    let b: i64 = mem[(base + ((off + (i >> 1)) & 0xFFFF)) & 0xFFFFF] as i64;
+    let b: i64 = rd8((base + ((off + (i >> 1)) & 0xFFFF)) & 0xFFFFF) as i64;
     if (i & 1) == 0 { b & 0xF } else { (b >> 4) & 0xF }
 }
 fn set_str_digit(base: i64, off: i64, i: i64, v: i64) {
@@ -397,7 +546,7 @@ fn op_bins_ext(op2: i64) {
         while k < cnt {
             let pos: i64 = offv + k;
             let a: i64 = (dbase + ((doff + (pos >> 3)) & 0xFFFF)) & 0xFFFFF;
-            let b: i64 = mem[a] as i64;
+            let b: i64 = rd8(a) as i64;
             let nb: i64 = if ((axv >> k) & 1) == 1 { b | (1 << (pos & 7)) } else { b & ~(1 << (pos & 7)) };
             wb8(a, nb as! u8);
             k += 1;
@@ -410,7 +559,7 @@ fn op_bins_ext(op2: i64) {
         var k: i64 = 0;
         while k < cnt {
             let pos: i64 = offv + k;
-            let b: i64 = mem[(sbase + ((soff + (pos >> 3)) & 0xFFFF)) & 0xFFFFF] as i64;
+            let b: i64 = rd8((sbase + ((soff + (pos >> 3)) & 0xFFFF)) & 0xFFFFF) as i64;
             if ((b >> (pos & 7)) & 1) == 1 { res |= 1 << k; }
             k += 1;
         }
@@ -427,8 +576,9 @@ fn op_bins_ext(op2: i64) {
 fn exec_one() -> bool {
     seg_override = -1;
     rep_prefix = 0;
+    dbg_ip = ip as i64;
     var op = fetch8();
-    while op == 0x26 || op == 0x2E || op == 0x36 || op == 0x3E || op == 0xF0 || op == 0xF2 || op == 0xF3 || (cpu_v20 && (op == 0x64 || op == 0x65)) {
+    while op == 0x26 || op == 0x2E || op == 0x36 || op == 0x3E || op == 0xF0 || op == 0xF2 || op == 0xF3 || (cpu_v20 && !cpu_mz && (op == 0x64 || op == 0x65)) {
         if op == 0xF0 { }
         else if op == 0xF2 { rep_prefix = 2; }
         else if op == 0xF3 { rep_prefix = 3; }
@@ -437,11 +587,13 @@ fn exec_one() -> bool {
         else { seg_override = (op >> 3) & 3; }
         op = fetch8();
     }
+    dbg_op = op;
     // 8086 decoder aliases: 60-6F execute as Jcc (70-7F); C0/C1/C8/C9 as C2/C3/CA/CB.
     if !cpu_v20 {
         if op >= 0x60 && op <= 0x6F { op = op + 0x10; }
         if op == 0xC0 || op == 0xC1 || op == 0xC8 || op == 0xC9 { op = op + 2; }
     }
+    if cpu_mz && (op == 0x0F || op == 0x63 || op == 0x64 || op == 0x65 || op == 0x66 || op == 0x67) { return true; }  // undefined on the V30MZ: 1-byte NOPs, no exception, no ModRM eaten (WSCpuTest)
     if cpu_v20 && op >= 0x60 && op <= 0x6B {  // 80186 additions on the V20 (6C-6F are string ops, handled below)
         if op == 0x60 { let sp0: i64 = r[4] as i64; push16(r[0] as i64); push16(r[1] as i64); push16(r[2] as i64); push16(r[3] as i64); push16(sp0); push16(r[5] as i64); push16(r[6] as i64); push16(r[7] as i64); return true; }  // PUSHA
         if op == 0x61 { r[7] = pop16() as! u16; r[6] = pop16() as! u16; r[5] = pop16() as! u16; r[4] = r[4] + 2; r[3] = pop16() as! u16; r[2] = pop16() as! u16; r[1] = pop16() as! u16; r[0] = pop16() as! u16; return true; }  // POPA
@@ -449,7 +601,7 @@ fn exec_one() -> bool {
         if op == 0x63 || op == 0x66 || op == 0x67 { decode_modrm(); return true; }  // undefined on the V20: decode and discard
         if op == 0x68 { let v = fetch16(); push16(v as i64); return true; }  // PUSH imm16
         if op == 0x6A { push16(s8(fetch8() as i64)); return true; }  // PUSH imm8 (sign-extended)
-        if op == 0x69 || op == 0x6B { decode_modrm(); let imm: i64 = if op == 0x69 { s16(fetch16() as i64) } else { s8(fetch8() as i64) }; let prod: i64 = s16(read_rm(true)) * imm; r[d_reg] = (prod & 0xFFFF) as! u16; let cfo: i64 = if prod != s16(prod & 0xFFFF) { 1 } else { 0 }; set_cf_of(cfo, cfo); return true; }  // IMUL reg, r/m, imm
+        if op == 0x69 || op == 0x6B { decode_modrm(); let imm: i64 = if op == 0x69 { s16(fetch16() as i64) } else { s8(fetch8() as i64) }; let prod: i64 = s16(read_rm(true)) * imm; r[d_reg] = (prod & 0xFFFF) as! u16; let cfo: i64 = if prod != s16(prod & 0xFFFF) { 1 } else { 0 }; if cpu_mz { mz_mul_flags(cfo); } else { set_cf_of(cfo, cfo); } return true; }  // IMUL reg, r/m, imm
         return false;
     }
     if cpu_v20 && op == 0x0F {  // NEC extended instructions
@@ -479,7 +631,20 @@ fn exec_one() -> bool {
         if op2 == 0x31 || op2 == 0x33 || op2 == 0x39 || op2 == 0x3B { op_bins_ext(op2); return true; }  // BINS/BEXT
         return false;
     }
-    if cpu_v20 && (op == 0xC0 || op == 0xC1) { decode_modrm(); let cnt: i64 = fetch8(); let size16: bool = (op & 1) == 1; let kind2: i64 = if d_reg == 6 { 4 } else { d_reg }; let v = read_rm(size16); let res = shift_op(kind2, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shift by imm8
+    if cpu_v20 && (op == 0xC0 || op == 0xC1) { decode_modrm(); let cnt: i64 = fetch8(); let size16: bool = (op & 1) == 1;
+        if cpu_mz && d_reg == 6 {
+            // V30MZ "SAL" (WSCpuTest): the operand always ends up zero,
+            // with flags as for an exhausted shift (SZP of zero, CF/OF/AF
+            // clear). Only imm 2 and 3 are exercised by the ROM, both with
+            // operands whose exiting bits are 0, so the exact effective
+            // count (imm+size is the natural reading) cannot be pinned
+            // down further from this data.
+            read_rm(size16);
+            write_rm(size16, 0);
+            flags = (((flags as i64) & 0xF72A) | 0x0044) as! u16;
+            return true;
+        }
+        let kind2: i64 = if d_reg == 6 { 4 } else { d_reg }; let v = read_rm(size16); let res = shift_op(kind2, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shift by imm8
     if cpu_v20 && op == 0xC8 { let disp = fetch16(); let level: i64 = (fetch8() as i64) & 0x1F; push16(r[5] as i64); let frame: i64 = r[4] as i64; if level > 0 { var bp2: i64 = r[5] as i64; for i in 1..level { bp2 -= 2; push16(seg_rd16((seg[2] as i64) << 4, bp2 & 0xFFFF) as i64); } push16(frame); } r[5] = frame as! u16; r[4] = ((frame - 2 * level - (disp as i64)) & 0xFFFF) as! u16; return true; }  // ENTER (V20: SP drops by the display size on top of disp)
     if cpu_v20 && op == 0xC9 { r[4] = r[5]; r[5] = pop16() as! u16; return true; }  // LEAVE
     if op == 0x88 { decode_modrm(); write_rm(false, get_r8(d_reg) as i64); return true; }
@@ -509,15 +674,16 @@ fn exec_one() -> bool {
     if op == 0x83 { decode_modrm(); let dst = read_rm(true); let b8 = fetch8(); let b8i: i64 = b8; let srcv: i64 = (if b8i > 127 { b8i - 256 } else { b8i }) & 0xFFFF; let res = alu_op(d_reg, dst, srcv, 16); if d_reg != 7 { write_rm(true, res); } return true; }
     if op >= 0x40 && op <= 0x47 { let i = op - 0x40; r[i] = do_incdec(r[i] as i64, false, 16) as! u16; return true; }  // INC r16
     if op >= 0x48 && op <= 0x4F { let i = op - 0x48; r[i] = do_incdec(r[i] as i64, true, 16) as! u16; return true; }  // DEC r16
-    if op == 0xFE { decode_modrm(); if d_reg == 0 { let v = read_rm(false); write_rm(false, do_incdec(v, false, 8)); return true; } if d_reg == 1 { let v = read_rm(false); write_rm(false, do_incdec(v, true, 8)); return true; } return false; }
+    if op == 0xFE { decode_modrm(); if d_reg == 0 { let v = read_rm(false); write_rm(false, do_incdec(v, false, 8)); return true; } if d_reg == 1 { let v = read_rm(false); write_rm(false, do_incdec(v, true, 8)); return true; } if d_reg == 6 { r[4] = r[4] - 2; let v = read_rm(true); seg_wr16((seg[2] as i64) << 4, r[4] as i64, v as! u16); return true; } if cpu_mz && d_reg == 7 { return true; } return false; }  // FE /6 = PUSH (word operand, SP first) as in the FF group; /7 is a NOP on the MZ
     if op == 0xFF { decode_modrm();
         if d_reg == 0 { let v = read_rm(true); write_rm(true, do_incdec(v, false, 16)); return true; }
         if d_reg == 1 { let v = read_rm(true); write_rm(true, do_incdec(v, true, 16)); return true; }
         if d_reg == 2 { let t = read_rm(true); push16(ip as i64); ip = t as! u16; return true; }  // CALL Ev
-        if d_reg == 3 { if d_isreg { return false; } let nip: i64 = seg_rd16(d_segbase, d_off); let ncs: i64 = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); push16(seg[1] as i64); push16(ip as i64); ip = nip as! u16; seg[1] = ncs as! u16; return true; }  // CALL far Ev
+        if d_reg == 3 { if d_isreg && !cpu_mz { return false; } let nip: i64 = seg_rd16(d_segbase, d_off); let ncs: i64 = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); push16(seg[1] as i64); push16(ip as i64); ip = nip as! u16; seg[1] = ncs as! u16; return true; }  // CALL far Ev (mod=3 on the MZ reads at the adder EA)
         if d_reg == 4 { ip = read_rm(true) as! u16; return true; }  // JMP Ev
-        if d_reg == 5 { if d_isreg { return false; } ip = seg_rd16(d_segbase, d_off); seg[1] = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); return true; }  // JMP far Ev
-        if d_reg == 6 || d_reg == 7 { r[4] = r[4] - 2; let v = read_rm(true); seg_wr16((seg[2] as i64) << 4, r[4] as i64, v as! u16); return true; }  // PUSH Ev (/7 aliases /6; SP decremented before the operand is read)
+        if d_reg == 5 { if d_isreg && !cpu_mz { return false; } ip = seg_rd16(d_segbase, d_off); seg[1] = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); return true; }  // JMP far Ev (mod=3 on the MZ reads at the adder EA)
+        if d_reg == 7 && cpu_mz { return true; }  // V30MZ: FF /7 is a NOP, not a PUSH (WSCpuTest)
+        if d_reg == 6 || d_reg == 7 { r[4] = r[4] - 2; let v = read_rm(true); seg_wr16((seg[2] as i64) << 4, r[4] as i64, v as! u16); return true; }  // PUSH Ev (/7 aliases /6 except on the MZ; SP decremented before the operand is read)
         return false; }
     
     if op == 0x86 { decode_modrm(); let t = read_rm(false); write_rm(false, get_r8(d_reg) as i64); set_r8(d_reg, t as! u8); return true; }  // XCHG Eb,Gb
@@ -547,9 +713,9 @@ fn exec_one() -> bool {
         }
         return true;
     }
-    if op == 0x8D { decode_modrm(); r[d_reg] = d_off as! u16; return true; }  // LEA
-    if op == 0xC4 { decode_modrm(); if d_isreg { return false; } let lo = seg_rd16(d_segbase, d_off); let hi = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); r[d_reg] = lo; seg[0] = hi; return true; }  // LES
-    if op == 0xC5 { decode_modrm(); if d_isreg { return false; } let lo = seg_rd16(d_segbase, d_off); let hi = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); r[d_reg] = lo; seg[3] = hi; return true; }  // LDS
+    if op == 0x8D { decode_modrm(); r[d_reg] = d_off as! u16; return true; }  // LEA (mod=3: d_off holds the MZ adder value)
+    if op == 0xC4 { decode_modrm(); if d_isreg && !cpu_mz { return false; } let lo = seg_rd16(d_segbase, d_off); let hi = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); r[d_reg] = lo; seg[0] = hi; return true; }  // LES (mod=3 on the MZ reads at the adder EA)
+    if op == 0xC5 { decode_modrm(); if d_isreg && !cpu_mz { return false; } let lo = seg_rd16(d_segbase, d_off); let hi = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); r[d_reg] = lo; seg[3] = hi; return true; }  // LDS (mod=3 on the MZ reads at the adder EA)
     if op == 0xCF { ip = pop16() as! u16; seg[1] = pop16() as! u16; load_flags(pop16()); return true; }  // IRET
     if op == 0x98 { if (r[0] & 0x80) != 0 { r[0] = (r[0] & 0xFF) | 0xFF00; } else { r[0] = r[0] & 0xFF; } return true; }  // CBW
     if op == 0x99 { r[2] = if (r[0] & 0x8000) != 0 { 0xFFFF } else { 0 }; return true; }  // CWD
@@ -557,23 +723,26 @@ fn exec_one() -> bool {
     if op == 0x9D { load_flags(pop16()); return true; }  // POPF
     if op == 0x9E { flags = (((flags as i64) & 0xFF00) | ((flags as i64) & 0x2A) | ((get_r8(4) as i64) & 0xD5)) as! u16; return true; }  // SAHF
     if op == 0x9F { set_r8(4, (flags & 0xFF) as! u8); return true; }  // LAHF
-    if op == 0xA0 { let off = fetch16(); set_r8(0, mem[(src_seg_base(3) + (off as i64)) & 0xFFFFF]); return true; }  // MOV AL,moffs8
+    if op == 0xA0 { let off = fetch16(); set_r8(0, rd8((src_seg_base(3) + (off as i64)) & 0xFFFFF)); return true; }  // MOV AL,moffs8
     if op == 0xA1 { let off = fetch16(); r[0] = seg_rd16(src_seg_base(3), off as i64); return true; }  // MOV AX,moffs16
     if op == 0xA2 { let off = fetch16(); wb8((src_seg_base(3) + (off as i64)) & 0xFFFFF, get_r8(0)); return true; }  // MOV moffs8,AL
     if op == 0xA3 { let off = fetch16(); seg_wr16(src_seg_base(3), off as i64, r[0]); return true; }  // MOV moffs16,AX
     if op >= 0xD0 && op <= 0xD3 { decode_modrm(); if d_reg == 6 && !cpu_v20 { if (op & 2) == 2 && get_r8(1) == 0 { return true; } let sm: bool = (op & 1) == 1; write_rm(sm, if sm { 0xFFFF } else { 0xFF }); flags = (((flags as i64) & 0xF72A) | 0x0084) as! u16; return true; } let size16: bool = (op & 1) == 1; let cnt: i64 = if (op & 2) == 0 { 1 } else { get_r8(1) as i64 }; let v = read_rm(size16); let res = shift_op(if d_reg == 6 { 4 } else { d_reg }, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shifts/rotates; /6 = SETMO (8086) or SAL (V20)
-    if op == 0xD4 { let base: i64 = fetch8(); if base == 0 { do_int(0); } else { let al: i64 = get_r8(0); let q: i64 = al / base; set_r8(4, q as! u8); set_r8(0, (al - q * base) as! u8); set_szp(al - q * base, 8); flags = flags & 0xF7EE; } return true; }  // AAM
-    if op == 0xD5 { let base: i64 = fetch8(); let ub: i64 = if cpu_v20 { 10 } else { base }; let lo: i64 = ((get_r8(4) as i64) * ub) & 0xFF; let v = alu_op(0, lo, get_r8(0) as i64, 8); set_r8(0, v as! u8); set_r8(4, 0); return true; }  // AAD
-    if op == 0xD6 { if cpu_v20 { let off: i64 = ((r[3] as i64) + (get_r8(0) as i64)) & 0xFFFF; set_r8(0, mem[(src_seg_base(3) + off) & 0xFFFFF]); } else { set_r8(0, if (flags & 1) != 0 { 0xFF } else { 0 }); } return true; }  // SALC (8086) / XLAT (V20)
-    if op == 0xD7 { let off: i64 = ((r[3] as i64) + (get_r8(0) as i64)) & 0xFFFF; set_r8(0, mem[(src_seg_base(3) + off) & 0xFFFFF]); return true; }  // XLAT
+    if op == 0xD4 { let base: i64 = fetch8(); if base == 0 { if cpu_mz { mz_div_flags(unit_cfof, if (get_r8(0) & 0xC0) == 0 { 1 } else { 0 }); } do_int(0); } else { let al: i64 = get_r8(0); let q: i64 = al / base; set_r8(4, q as! u8); set_r8(0, (al - q * base) as! u8); set_szp(al - q * base, 8); flags = flags & 0xF7EE; } return true; }  // AAM
+    if op == 0xD5 { let base: i64 = fetch8(); let ub: i64 = if cpu_v20 && !cpu_mz { 10 } else { base }; let lo: i64 = ((get_r8(4) as i64) * ub) & 0xFF; let v = alu_op(0, lo, get_r8(0) as i64, 8); set_r8(0, v as! u8); set_r8(4, 0); return true; }  // AAD
+    if op == 0xD6 { if cpu_v20 && !cpu_mz { let off: i64 = ((r[3] as i64) + (get_r8(0) as i64)) & 0xFFFF; set_r8(0, rd8((src_seg_base(3) + off) & 0xFFFFF)); } else { set_r8(0, if (flags & 1) != 0 { 0xFF } else { 0 }); } return true; }  // SALC (8086 and V30MZ) / XLAT (V20)
+    if op == 0xD7 { let off: i64 = ((r[3] as i64) + (get_r8(0) as i64)) & 0xFFFF; set_r8(0, rd8((src_seg_base(3) + off) & 0xFFFFF)); return true; }  // XLAT
     if op >= 0xD8 && op <= 0xDF { decode_modrm(); return true; }  // ESC: no coprocessor, no architectural effect
-    if op == 0xE4 { fetch8(); set_r8(0, 0xFF); return true; }  // IN AL,imm8 (open bus reads as FF)
-    if op == 0xE5 { fetch8(); r[0] = 0xFFFF; return true; }  // IN AX,imm8
-    if op == 0xE6 { fetch8(); return true; }  // OUT imm8,AL
-    if op == 0xE7 { fetch8(); return true; }  // OUT imm8,AX
-    if op == 0xEC { set_r8(0, 0xFF); return true; }  // IN AL,DX
-    if op == 0xED { r[0] = 0xFFFF; return true; }  // IN AX,DX
-    if op == 0xEE || op == 0xEF { return true; }  // OUT DX,AL/AX
+    if op == 0xE4 { let pt: i64 = fetch8() as i64; set_r8(0, if ws_mode { port_rd(pt) as! u8 } else { 0xFF }); return true; }  // IN AL,imm8 (SST rig: open bus reads as FF)
+    if op == 0xE5 { let pt: i64 = fetch8() as i64; if ws_mode { let lo = port_rd(pt); let hi = port_rd(pt + 1); r[0] = ((hi << 8) | lo) as! u16; } else { r[0] = 0xFFFF; } return true; }  // IN AX,imm8
+    if op == 0xE6 { let pt: i64 = fetch8() as i64; if ws_mode { port_wr(pt, get_r8(0) as i64); } return true; }  // OUT imm8,AL
+    if op == 0xE7 { let pt: i64 = fetch8() as i64; if ws_mode { port_wr(pt, r[0] & 0xFF); port_wr(pt + 1, (r[0] >> 8) & 0xFF); } return true; }  // OUT imm8,AX
+    if op == 0xEC { set_r8(0, if ws_mode { port_rd(r[2] & 0xFF) as! u8 } else { 0xFF }); return true; }  // IN AL,DX
+    if op == 0xED { if ws_mode { let pt: i64 = r[2] & 0xFF; let lo = port_rd(pt); let hi = port_rd(pt + 1); r[0] = ((hi << 8) | lo) as! u16; } else { r[0] = 0xFFFF; } return true; }  // IN AX,DX
+    if op == 0xEE { if ws_mode { port_wr(r[2] & 0xFF, get_r8(0) as i64); } return true; }  // OUT DX,AL
+    if op == 0xEF { if ws_mode { let pt: i64 = r[2] & 0xFF; port_wr(pt, r[0] & 0xFF); port_wr(pt + 1, (r[0] >> 8) & 0xFF); } return true; }  // OUT DX,AX
+    if op == 0x9B { return true; }  // WAIT: no coprocessor attached, a NOP
+    if op == 0xF4 && ws_mode { cpu_halted = true; return true; }  // HLT: the runner wakes the CPU on interrupts
     if op == 0xF5 { flags = flags ^ 1; return true; }  // CMC
     if op == 0xF8 { flags = flags & 0xFFFE; return true; }  // CLC
     if op == 0xF9 { flags = flags | 1; return true; }  // STC
@@ -581,27 +750,29 @@ fn exec_one() -> bool {
     if op == 0xFB { flags = flags | 0x0200; return true; }  // STI
     if op == 0xFC { flags = flags & 0xFBFF; return true; }  // CLD
     if op == 0xFD { flags = flags | 0x0400; return true; }  // STD
-    if op == 0x27 { let oa: i64 = get_r8(0); var adj: i64 = 0; var af: i64 = 0; if ((oa & 0xF) > 9) || ((flags >> 4) & 1) == 1 { adj += 6; af = 1; } var cf: i64 = 0; if oa >= 0xA0 || (flags & 1) == 1 || (oa > 0x99 && ((flags >> 4) & 1) == 0) { adj += 0x60; cf = 1; } let res: i64 = (oa + adj) & 0xFF; set_r8(0, res as! u8); var nf: i64 = (flags as i64) & 0xF72A; if cf == 1 { nf |= 1; } if af == 1 { nf |= 0x10; } if ((oa ^ res) & (adj ^ res) & 0x80) != 0 { nf |= 0x0800; } flags = nf as! u16; set_szp(res, 8); return true; }  // DAA
-    if op == 0x2F { let oa: i64 = get_r8(0); var adj: i64 = 0; var af: i64 = 0; if ((oa & 0xF) > 9) || ((flags >> 4) & 1) == 1 { adj += 6; af = 1; } var cf: i64 = 0; if oa >= 0xA0 || (flags & 1) == 1 || (oa > 0x99 && ((flags >> 4) & 1) == 0) { adj += 0x60; cf = 1; } let res: i64 = (oa - adj) & 0xFF; set_r8(0, res as! u8); var nf: i64 = (flags as i64) & 0xF72A; if cf == 1 { nf |= 1; } if af == 1 { nf |= 0x10; } if ((oa ^ adj) & (oa ^ res) & 0x80) != 0 { nf |= 0x0800; } flags = nf as! u16; set_szp(res, 8); return true; }  // DAS
-    if op == 0x37 { let ax0: i64 = r[0]; let adj: bool = ((ax0 & 0xF) > 9) || ((flags >> 4) & 1) == 1; let al0: i64 = ax0 & 0xFF; let ah0: i64 = (ax0 >> 8) & 0xFF; var szp: i64 = al0; if adj { szp = (al0 + 6) & 0xFF; r[0] = ((((ah0 + 1) & 0xFF) << 8) | (szp & 0xF)) as! u16; } else { r[0] = ((ax0 & 0xFF00) | (ax0 & 0xF)) as! u16; } var nf: i64 = (flags as i64) & 0xF72A; if adj { nf |= 0x11; if ((al0 ^ szp) & (6 ^ szp) & 0x80) != 0 { nf |= 0x0800; } } flags = nf as! u16; set_szp(szp, 8); return true; }  // AAA
-    if op == 0x3F { let ax0: i64 = r[0]; let adj: bool = ((ax0 & 0xF) > 9) || ((flags >> 4) & 1) == 1; let al0: i64 = ax0 & 0xFF; let ah0: i64 = (ax0 >> 8) & 0xFF; var szp: i64 = al0; if adj { szp = (al0 - 6) & 0xFF; r[0] = ((((ah0 - 1) & 0xFF) << 8) | (szp & 0xF)) as! u16; } else { r[0] = ((ax0 & 0xFF00) | (ax0 & 0xF)) as! u16; } var nf: i64 = (flags as i64) & 0xF72A; if adj { nf |= 0x11; if ((al0 ^ 6) & (al0 ^ szp) & 0x80) != 0 { nf |= 0x0800; } } flags = nf as! u16; set_szp(szp, 8); return true; }  // AAS
+    if op == 0x27 { let oa: i64 = get_r8(0); var adj: i64 = 0; var af: i64 = 0; if ((oa & 0xF) > 9) || ((flags >> 4) & 1) == 1 { adj += 6; af = 1; } var cf: i64 = 0; if (cpu_mz && (oa > 0x99 || (flags & 1) == 1)) || (!cpu_mz && (oa >= 0xA0 || (flags & 1) == 1 || (oa > 0x99 && ((flags >> 4) & 1) == 0))) { adj += 0x60; cf = 1; } let res: i64 = (oa + adj) & 0xFF; set_r8(0, res as! u8); var nf: i64 = (flags as i64) & 0xF72A; if cf == 1 { nf |= 1; } if af == 1 { nf |= 0x10; } if ((oa ^ res) & (adj ^ res) & 0x80) != 0 { nf |= 0x0800; } flags = nf as! u16; set_szp(res, 8); return true; }  // DAA
+    if op == 0x2F { let oa: i64 = get_r8(0); var adj: i64 = 0; var af: i64 = 0; if ((oa & 0xF) > 9) || ((flags >> 4) & 1) == 1 { adj += 6; af = 1; } var cf: i64 = 0; if (cpu_mz && (oa > 0x99 || (flags & 1) == 1)) || (!cpu_mz && (oa >= 0xA0 || (flags & 1) == 1 || (oa > 0x99 && ((flags >> 4) & 1) == 0))) { adj += 0x60; cf = 1; } let res: i64 = (oa - adj) & 0xFF; set_r8(0, res as! u8); var nf: i64 = (flags as i64) & 0xF72A; if cf == 1 { nf |= 1; } if af == 1 { nf |= 0x10; } if ((oa ^ adj) & (oa ^ res) & 0x80) != 0 { nf |= 0x0800; } flags = nf as! u16; set_szp(res, 8); return true; }  // DAS
+    if op == 0x37 { if cpu_mz { let ax0: i64 = r[0]; let adjz: bool = ((ax0 & 0xF) > 9) || ((flags >> 4) & 1) == 1; let nib: i64 = ax0 & 0xF; if adjz { r[0] = ((((ax0 >> 8) + 1) & 0xFF) << 8 | ((nib + 6) & 0xF)) as! u16; } else { r[0] = ((ax0 & 0xFF00) | nib) as! u16; } flags = (((flags as i64) & 0xF700) | (if adjz { 0x57 } else { 0x86 })) as! u16; return true; } let ax0: i64 = r[0]; let adj: bool = ((ax0 & 0xF) > 9) || ((flags >> 4) & 1) == 1; let al0: i64 = ax0 & 0xFF; let ah0: i64 = (ax0 >> 8) & 0xFF; var szp: i64 = al0; if adj { szp = (al0 + 6) & 0xFF; r[0] = ((((ah0 + 1) & 0xFF) << 8) | (szp & 0xF)) as! u16; } else { r[0] = ((ax0 & 0xFF00) | (ax0 & 0xF)) as! u16; } var nf: i64 = (flags as i64) & 0xF72A; if adj { nf |= 0x11; if ((al0 ^ szp) & (6 ^ szp) & 0x80) != 0 { nf |= 0x0800; } } flags = nf as! u16; set_szp(szp, 8); return true; }  // AAA
+    if op == 0x3F { if cpu_mz { let ax0: i64 = r[0]; let adjz: bool = ((ax0 & 0xF) > 9) || ((flags >> 4) & 1) == 1; let nib: i64 = ax0 & 0xF; if adjz { r[0] = ((((ax0 >> 8) - 1) & 0xFF) << 8 | ((nib - 6) & 0xF)) as! u16; } else { r[0] = ((ax0 & 0xFF00) | nib) as! u16; } flags = (((flags as i64) & 0xF700) | (if adjz { 0x57 } else { 0x86 })) as! u16; return true; } let ax0: i64 = r[0]; let adj: bool = ((ax0 & 0xF) > 9) || ((flags >> 4) & 1) == 1; let al0: i64 = ax0 & 0xFF; let ah0: i64 = (ax0 >> 8) & 0xFF; var szp: i64 = al0; if adj { szp = (al0 - 6) & 0xFF; r[0] = ((((ah0 - 1) & 0xFF) << 8) | (szp & 0xF)) as! u16; } else { r[0] = ((ax0 & 0xFF00) | (ax0 & 0xF)) as! u16; } var nf: i64 = (flags as i64) & 0xF72A; if adj { nf |= 0x11; if ((al0 ^ 6) & (al0 ^ szp) & 0x80) != 0 { nf |= 0x0800; } } flags = nf as! u16; set_szp(szp, 8); return true; }  // AAS
     if op == 0xF6 { decode_modrm();
+        if cpu_mz && d_reg == 1 { return true; }  // V30MZ: F6 /1 is undefined, a 2-byte NOP; the imm8 is NOT eaten (WSCpuTest)
         if d_reg == 0 || d_reg == 1 { let imm: i64 = fetch8(); let dst = read_rm(false); alu_op(4, dst, imm, 8); return true; }
         if d_reg == 2 { let v = read_rm(false); write_rm(false, (~v) & 0xFF); return true; }
         if d_reg == 3 { let v = read_rm(false); let res = alu_op(5, 0, v, 8); write_rm(false, res); return true; }
         if d_reg == 4 { let b = read_rm(false); let prod: i64 = (get_r8(0) as i64) * b; r[0] = prod as! u16; mul_flags(prod >> 8, 8); return true; }
-        if d_reg == 5 { let b = read_rm(false); let prod: i64 = s8(get_r8(0) as i64) * s8(b); r[0] = (prod & 0xFFFF) as! u16; let cfo: i64 = if prod != s8(prod & 0xFF) { 1 } else { 0 }; set_cf_of(cfo, cfo); return true; }
-        if d_reg == 6 { let b = read_rm(false); let dvd: i64 = r[0]; if b == 0 { do_int(0); } else if dvd / b > 0xFF { do_int(0); } else { set_r8(0, (dvd / b) as! u8); set_r8(4, (dvd - (dvd / b) * b) as! u8); } return true; }
-        if d_reg == 7 { let b = read_rm(false); let dvd: i64 = s16(r[0] as i64); if b == 0 { do_int(0); } else { let q, rem = trunc_divmod(dvd, s8(b)); if q > 127 || q < (0 - 128) { do_int(0); } else { set_r8(0, (q & 0xFF) as! u8); set_r8(4, (rem & 0xFF) as! u8); } } return true; }
+        if d_reg == 5 { let b = read_rm(false); let prod: i64 = s8(get_r8(0) as i64) * s8(b); r[0] = (prod & 0xFFFF) as! u16; let cfo: i64 = if prod != s8(prod & 0xFF) { 1 } else { 0 }; if cpu_mz { mz_mul_flags(cfo); } else { set_cf_of(cfo, cfo); } return true; }
+        if d_reg == 6 { let b = read_rm(false); let dvd: i64 = r[0]; if cpu_mz { var fault: bool = b == 0; if !fault { fault = dvd / b > 0xFF; } if fault { mz_div_flags(unit_cfof, divu8_err_zf(dvd, b)); do_int(0); } else { let q: i64 = dvd / b; let rem: i64 = dvd - q * b; set_r8(0, q as! u8); set_r8(4, rem as! u8); mz_div_flags(unit_cfof, if rem == 0 && (q & 1) == 1 { 1 } else { 0 }); } return true; } if b == 0 { do_int(0); } else if dvd / b > 0xFF { do_int(0); } else { set_r8(0, (dvd / b) as! u8); set_r8(4, (dvd - (dvd / b) * b) as! u8); } return true; }
+        if d_reg == 7 { let b = read_rm(false); let dvd: i64 = s16(r[0] as i64); if cpu_mz { if b == 0 && (r[0] as i64) == 0x8000 { r[0] = 0x0081; flags = (((flags as i64) & 0xF700) | 0x02) as! u16; set_szp(0x81, 8); return true; } var fault: bool = b == 0; var q: i64 = 0; var rem: i64 = 0; if !fault { let qq, rr = trunc_divmod(dvd, s8(b)); q = qq; rem = rr; fault = q > 127 || q < (0 - 127); } if fault { mz_div_flags(unit_cfof, 0); do_int(0); } else { set_r8(0, (q & 0xFF) as! u8); set_r8(4, (rem & 0xFF) as! u8); flags = (((flags as i64) & 0xF700) | 0x02) as! u16; set_szp(q & 0xFF, 8); } return true; } if b == 0 { do_int(0); } else { let q, rem = trunc_divmod(dvd, s8(b)); if q > 127 || q < (0 - 128) { do_int(0); } else { set_r8(0, (q & 0xFF) as! u8); set_r8(4, (rem & 0xFF) as! u8); } } return true; }
         return false; }
     if op == 0xF7 { decode_modrm();
+        if cpu_mz && d_reg == 1 { return true; }  // V30MZ: F7 /1 is undefined, a 2-byte NOP; the imm16 is NOT eaten (WSCpuTest)
         if d_reg == 0 || d_reg == 1 { let imm: i64 = fetch16(); let dst = read_rm(true); alu_op(4, dst, imm, 16); return true; }
         if d_reg == 2 { let v = read_rm(true); write_rm(true, (~v) & 0xFFFF); return true; }
         if d_reg == 3 { let v = read_rm(true); let res = alu_op(5, 0, v, 16); write_rm(true, res); return true; }
         if d_reg == 4 { let b = read_rm(true); let prod: i64 = (r[0] as i64) * b; r[0] = (prod & 0xFFFF) as! u16; r[2] = ((prod >> 16) & 0xFFFF) as! u16; mul_flags((prod >> 16) & 0xFFFF, 16); return true; }
-        if d_reg == 5 { let b = read_rm(true); let prod: i64 = s16(r[0] as i64) * s16(b); r[0] = (prod & 0xFFFF) as! u16; r[2] = ((prod >> 16) & 0xFFFF) as! u16; let cfo: i64 = if prod != s16(prod & 0xFFFF) { 1 } else { 0 }; set_cf_of(cfo, cfo); return true; }
-        if d_reg == 6 { let b = read_rm(true); let dvd: i64 = ((r[2] as i64) << 16) | (r[0] as i64); if b == 0 { do_int(0); } else if dvd / b > 0xFFFF { do_int(0); } else { r[0] = (dvd / b) as! u16; r[2] = (dvd - (dvd / b) * b) as! u16; } return true; }
-        if d_reg == 7 { let b = read_rm(true); let dvd: i64 = s32(((r[2] as i64) << 16) | (r[0] as i64)); if b == 0 { do_int(0); } else { let q, rem = trunc_divmod(dvd, s16(b)); if q > 32767 || q < (0 - 32768) { do_int(0); } else { r[0] = (q & 0xFFFF) as! u16; r[2] = (rem & 0xFFFF) as! u16; } } return true; }
+        if d_reg == 5 { let b = read_rm(true); let prod: i64 = s16(r[0] as i64) * s16(b); r[0] = (prod & 0xFFFF) as! u16; r[2] = ((prod >> 16) & 0xFFFF) as! u16; let cfo: i64 = if prod != s16(prod & 0xFFFF) { 1 } else { 0 }; if cpu_mz { mz_mul_flags(cfo); } else { set_cf_of(cfo, cfo); } return true; }
+        if d_reg == 6 { let b = read_rm(true); let dvd: i64 = ((r[2] as i64) << 16) | (r[0] as i64); if cpu_mz { var fault: bool = b == 0; if !fault { fault = dvd / b > 0xFFFF; } if fault { mz_div_flags(0, divu16_err_zf(r[2] as i64, r[0] as i64, b)); do_int(0); } else { let q: i64 = dvd / b; let rem: i64 = dvd - q * b; r[0] = q as! u16; r[2] = rem as! u16; mz_div_flags(0, if rem == 0 && (q & 1) == 1 { 1 } else { 0 }); } return true; } if b == 0 { do_int(0); } else if dvd / b > 0xFFFF { do_int(0); } else { r[0] = (dvd / b) as! u16; r[2] = (dvd - (dvd / b) * b) as! u16; } return true; }
+        if d_reg == 7 { let b = read_rm(true); let dvd: i64 = s32(((r[2] as i64) << 16) | (r[0] as i64)); if cpu_mz { if b == 0 && (r[2] as i64) == 0x8000 && (r[0] as i64) == 0 { r[0] = 0x8001; r[2] = 0; mz_div_flags(0, 1); return true; } var fault: bool = b == 0; var q: i64 = 0; var rem: i64 = 0; if !fault { let qq, rr = trunc_divmod(dvd, s16(b)); q = qq; rem = rr; fault = q > 32767 || q < (0 - 32767); } if fault { mz_div_flags(0, 0); do_int(0); } else { r[0] = (q & 0xFFFF) as! u16; r[2] = (rem & 0xFFFF) as! u16; mz_div_flags(0, if rem == 0 && (q & 1) == 1 { 1 } else { 0 }); } return true; } if b == 0 { do_int(0); } else { let q, rem = trunc_divmod(dvd, s16(b)); if q > 32767 || q < (0 - 32768) { do_int(0); } else { r[0] = (q & 0xFFFF) as! u16; r[2] = (rem & 0xFFFF) as! u16; } } return true; }
         return false; }
     if op == 0x8C { decode_modrm(); write_rm(true, seg[d_reg & 3] as i64); return true; }  // MOV Ev,seg
     if op == 0x8E { decode_modrm(); let v = read_rm(true); seg[d_reg & 3] = v as! u16; return true; }  // MOV seg,Ev
@@ -757,9 +928,118 @@ fn run_file(path: u8[:]) {
     print(path, ": total=", total, " passed=", passed, " failed=", failed, " unsupported=", unsupported);
 }
 
+// Render the background map as text: the low byte of each map entry is the
+// character code (that is how test ROMs print), the BG scroll Y register
+// gives the first visible map row.
+fn ws_screen_text(buf: u8[:]) -> i64 {
+    let mapbase: i64 = ((io_ports[0x07] as i64) & 0x0F) << 11;
+    let top: i64 = ((io_ports[0x11] as i64) >> 3) & 31;
+    var n: i64 = 0;
+    for y in 18 {
+        let row: i64 = (top + y) & 31;
+        for x in 28 {
+            let c = mem[mapbase + (row * 32 + x) * 2];
+            buf[n] = if c >= 32 && c < 127 { c } else { 46 };  // '.' for non-printables
+            n += 1;
+        }
+        buf[n] = 10; n += 1;
+    }
+    n
+}
+
+fn count_ok(buf: u8[:], n: i64) -> i64 {
+    var cnt: i64 = 0;
+    var i: i64 = 0;
+    while i + 1 < n {
+        if buf[i] == 79 && buf[i + 1] == 107 { cnt += 1; }  // "Ok"
+        i += 1;
+    }
+    cnt
+}
+
+// Run a WonderSwan ROM headlessly: reset to CS=FFFF:0000 (the linear
+// window's modulo decode lands on the cartridge footer), raise VBlank
+// once per frame of executed steps, and script a single A press so menu
+// driven test ROMs start their "Test All". Stops when the screen shows
+// "Ok" at least 7 times (one per suite), when the screen has been frozen
+// for 600 frames (a failure stop inside the ROM), or at the frame cap.
+fn run_ws(path: u8[:]) {
+    ws_mode = true;
+    cpu_v20 = true;
+    cpu_mz = true;
+    guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
+    print("rom loaded: ", rom.len, " bytes");
+    for i in 1048576 { mem[i] = 0; }
+    for i in 256 { io_ports[i] = 0; }
+    bk_ram = 0xFF; bk_rom0 = 0xFF; bk_rom1 = 0xFF; bk_linear = 0;
+    int_cause = 0; key_select = 0; keys_state = 0; cpu_halted = false;
+    for i in 8 { r[i] = 0; }
+    for i in 4 { seg[i] = 0; }
+    seg[1] = 0xFFFF; ip = 0; flags = 0;
+    var screen: u8[1024] = [0; 1024];
+    var last: u8[1024] = [0; 1024];
+    var lastn: i64 = 0;
+    var frozen: i64 = 0;
+    var total: i64 = 0;
+    var menu_idx: i64 = 0;
+    let argv2 = args();
+    var survey: bool = false;
+    if argv2.len > 3 {
+        let a3 = argv2[3];
+        if a3.len > 0 && a3[a3.len - 1] == 43 { survey = true; }
+        if a3 == "logic" || a3 == "logic+" { menu_idx = 1; }
+        else if a3 == "arith" || a3 == "arith+" { menu_idx = 2; }
+        else if a3 == "rot" || a3 == "rot+" { menu_idx = 3; }
+        else if a3 == "misc" || a3 == "misc+" { menu_idx = 4; }
+        else if a3 == "mul" || a3 == "mul+" { menu_idx = 5; }
+        else if a3 == "div" || a3 == "div+" { menu_idx = 6; }
+        else if a3 == "sdiv" || a3 == "sdiv+" { menu_idx = 7; }
+    }
+    var skips: i64 = 0;
+    var skip_hold: i64 = 0;
+    var frame: i64 = 0;
+    var done: bool = false;
+    while frame < 60000 && !done {
+        int_cause |= 0x40;  // VBLANK_START
+        keys_state = 0;
+        if skip_hold > 0 { keys_state = 1 << 11; skip_hold -= 1; }
+        if menu_idx > 0 {
+            // tap X3 (down) menu_idx times, one tap per 4 frames, then A
+            let rel: i64 = frame - 30;
+            if rel >= 0 {
+                let tap: i64 = rel / 4;
+                if tap < menu_idx { if rel % 4 < 2 { keys_state = 1 << 6; } }
+                else if rel - menu_idx * 4 < 4 { keys_state = 1 << 10; }
+            }
+        } else if frame >= 30 && frame < 45 { keys_state = 1 << 10; }  // hold A to pick "Test All"
+        var step: i64 = 0;
+        while step < 100000 {
+            ws_deliver_int();
+            if (flags & 0x0100) != 0 && dbg_op != 0x9D && dbg_op != 0xCF { do_int(1); }  // TF single-step trap
+            if !cpu_halted {
+                if !exec_one() { print("unsupported opcode ", dbg_op, " at cs:ip ", seg[1], ":", dbg_ip, " frame ", frame); let m = ws_screen_text(screen); write_stdout(screen[..m]); exit(1); }
+                total += 1;
+            }
+            step += 1;
+        }
+        let n = ws_screen_text(screen);
+        var same: bool = n == lastn;
+        if same { for i in n { if screen[i] != last[i] { same = false; } } }
+        if same { frozen += 1; } else { frozen = 0; for i in n { last[i] = screen[i]; } lastn = n; }
+        if survey && frozen >= 90 && skips < 40 { skips += 1; print("survey skip ", skips, " at frame ", frame, " after ", total, " instructions; screen was:"); write_stdout(screen[..n]); skip_hold = 6; frozen = 0; for i in n { last[i] = 0; } lastn = 0; }
+        else if frozen >= 600 { print("screen frozen for 600 frames at frame ", frame, " after ", total, " instructions (waiting for a key: end of Test All or a failure stop)"); done = true; }
+        else if frame % 2000 == 0 { print("frame ", frame, " oks=", count_ok(screen, n)); write_stdout(screen[..n]); }
+        frame += 1;
+    }
+    print("final screen (frame ", frame, ", ", total, " instructions):");
+    let m = ws_screen_text(screen);
+    write_stdout(screen[..m]);
+}
+
 fn main() {
     let argv = args();
-    if argv.len < 2 { print("usage: sst [v20] <case-file.json> [more files...]"); exit(1); }
+    if argv.len < 2 { print("usage: sst [v20] <case-file.json> [more files...] | sst ws <rom.ws|wsc>"); exit(1); }
+    if argv[1] == "ws" { run_ws(argv[2]); return; }
     var start: i64 = 1;
     if argv[1] == "v20" { cpu_v20 = true; start = 2; }
     for i in start..argv.len { run_file(argv[i]); }

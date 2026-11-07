@@ -11,7 +11,7 @@ and the next step recorded in the session notes.
 - Done when: the harness runs a real 8086 case file and reports pass/fail counts.
 - Result: 28,000 cases passing (MOV + ADD slice). See docs/sessions/2026-11-07-m0.md.
 
-## M1 — CPU complete (in progress)
+## M1 — CPU complete ✅ (2026-11-07)
 - All documented 8086 instructions pass the SingleStepTests 8086 corpus.
   Status 2026-11-07: 634,406 / 646,000 cases (98.21%); the only failures are
   documented-undefined flag residue after DIV/IDIV/IMUL and AAM base 0.
@@ -22,10 +22,20 @@ and the next step recorded in the session notes.
   bit-string ops (values exact), and ROL4/ROR4, whose register-entangled
   behaviour is still unexplained.
 - Done when: WSCpuTest agrees (V30MZ-specific behaviour flushed out).
+  Result 2026-11-07: **WSCpuTest Test All passes end to end** on the
+  colour model — all 7 suites "Ok!", 5.44 billion instructions, under a
+  `cpu_mz` profile layered on the V20 profile. V30MZ deltas (shift-count
+  masking, undefined-opcode map, LEA/LES/LDS mod=3 adder quirk, BCD and
+  multiply/divide flag models, the stale multiply/divide-unit CF/OF)
+  are catalogued in docs/sessions/2026-11-07-wscputest.md.
 
-## M2 — Bus and cartridge
+## M2 — Bus and cartridge (in progress)
 - Memory map, I/O-port bank switching, SRAM/EEPROM.
 - Done when: test ROMs boot and run to their result screens.
+- Status 2026-11-07: the groundwork was pulled forward into the M1
+  session — memory map with bank/linear windows, the port registers
+  WSCpuTest needs, and a headless ROM runner that boots cartridges and
+  reads results off the BG map. Remaining: fuller I/O coverage, EEPROM.
 
 ## M3 — PPU
 - 224x144 rendering (mono + color modes, sprites, windows).
