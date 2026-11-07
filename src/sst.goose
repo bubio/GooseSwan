@@ -121,7 +121,27 @@ fn alu_op(kind: i64, a: i64, b: i64, bits: i64) -> i64 {
     return res;
 }
 
-// ---- Instruction slice: MOV + ADD ----
+
+fn incdec_flags(a: i64, res: i64, dec: bool, bits: i64) {
+    let sign: i64 = if bits == 16 { 0x8000 } else { 0x80 };
+    var f: i64 = (flags as i64) & 0xF72B;  // INC/DEC preserve CF
+    if parity_even(res & 0xFF) { f |= 0x0004; }
+    if dec { if (a & 0xF) == 0 { f |= 0x0010; } } else { if (a & 0xF) == 0xF { f |= 0x0010; } }
+    if res == 0 { f |= 0x0040; }
+    if (res & sign) != 0 { f |= 0x0080; }
+    if dec { if a == sign { f |= 0x0800; } } else { if res == sign { f |= 0x0800; } }
+    flags = f as! u16;
+}
+fn do_incdec(v: i64, dec: bool, bits: i64) -> i64 {
+    let mask: i64 = if bits == 16 { 0xFFFF } else { 0xFF };
+    let res: i64 = if dec { (v - 1) & mask } else { (v + 1) & mask };
+    incdec_flags(v, res, dec, bits);
+    return res;
+}
+fn push16(v: i64) { r[4] = r[4] - 2; wb16(phys(seg[2], r[4]), v as! u16); }
+fn pop16() -> i64 { let v: i64 = rb16(phys(seg[2], r[4])); r[4] = r[4] + 2; v }
+
+// ---- Instruction slice ----
 fn exec_one() -> bool {
     seg_override = -1;
     var op = fetch8();
@@ -154,6 +174,19 @@ fn exec_one() -> bool {
     if op == 0x80 { decode_modrm(); let dst = read_rm(false); let srcv: i64 = fetch8(); let res = alu_op(d_reg, dst, srcv, 8); if d_reg != 7 { write_rm(false, res); } return true; }
     if op == 0x81 { decode_modrm(); let dst = read_rm(true); let srcv: i64 = fetch16(); let res = alu_op(d_reg, dst, srcv, 16); if d_reg != 7 { write_rm(true, res); } return true; }
     if op == 0x83 { decode_modrm(); let dst = read_rm(true); let b8 = fetch8(); let b8i: i64 = b8; let srcv: i64 = (if b8i > 127 { b8i - 256 } else { b8i }) & 0xFFFF; let res = alu_op(d_reg, dst, srcv, 16); if d_reg != 7 { write_rm(true, res); } return true; }
+    if op >= 0x40 && op <= 0x47 { let i = op - 0x40; r[i] = do_incdec(r[i] as i64, false, 16) as! u16; return true; }  // INC r16
+    if op >= 0x48 && op <= 0x4F { let i = op - 0x48; r[i] = do_incdec(r[i] as i64, true, 16) as! u16; return true; }  // DEC r16
+    if op == 0xFE { decode_modrm(); if d_reg == 0 { let v = read_rm(false); write_rm(false, do_incdec(v, false, 8)); return true; } if d_reg == 1 { let v = read_rm(false); write_rm(false, do_incdec(v, true, 8)); return true; } return false; }
+    if op == 0xFF { decode_modrm(); if d_reg == 0 { let v = read_rm(true); write_rm(true, do_incdec(v, false, 16)); return true; } if d_reg == 1 { let v = read_rm(true); write_rm(true, do_incdec(v, true, 16)); return true; } return false; }  // /2-/7: CALL/JMP/PUSH, later slice
+    if op == 0x86 { decode_modrm(); let t = read_rm(false); write_rm(false, get_r8(d_reg) as i64); set_r8(d_reg, t as! u8); return true; }  // XCHG Eb,Gb
+    if op == 0x87 { decode_modrm(); let t = read_rm(true); write_rm(true, r[d_reg] as i64); r[d_reg] = t as! u16; return true; }  // XCHG Ev,Gv
+    if op == 0x90 { return true; }  // NOP (XCHG AX,AX)
+    if op >= 0x91 && op <= 0x97 { let i = op - 0x90; let t = r[0]; r[0] = r[i]; r[i] = t; return true; }  // XCHG AX,r16
+    if op >= 0x50 && op <= 0x57 { r[4] = r[4] - 2; wb16(phys(seg[2], r[4]), r[op - 0x50]); return true; }  // PUSH r16 (reg read after decrement: 8086 PUSH SP pushes the new SP)
+    if op >= 0x58 && op <= 0x5F { let v = pop16(); r[op - 0x58] = v as! u16; return true; }  // POP r16
+    if op == 0x06 || op == 0x0E || op == 0x16 || op == 0x1E { push16(seg[(op >> 3) & 3] as i64); return true; }  // PUSH seg
+    if op == 0x07 || op == 0x0F || op == 0x17 || op == 0x1F { let v = pop16(); seg[(op >> 3) & 3] = v as! u16; return true; }  // POP seg (0F = POP CS, 8086 only)
+    if op == 0x8F { decode_modrm(); let v = pop16(); write_rm(true, v); return true; }  // POP Ev
     return false;
 }
 
