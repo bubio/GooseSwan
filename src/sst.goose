@@ -294,6 +294,135 @@ fn str_step(op: i64) {
     }
 }
 
+
+// ---- NEC V20/V30 extended instructions (0F-prefixed) ----
+fn bcd4_step(d: i64, s: i64, cin: i64, sub: bool) -> i64, i64 {
+    // One byte of an ADD4S/SUB4S/CMP4S string: a binary add/sub followed by a
+    // DAA/DAS-style correction; the low digit's +6 carries into the high digit
+    // like a binary carry, which is where it differs from per-digit BCD.
+    if !sub {
+        let t: i64 = d + s + cin;
+        let lo: i64 = (d & 0xF) + (s & 0xF) + cin;
+        var adj: i64 = 0;
+        if lo > 9 { adj += 6; }
+        let hi: i64 = (d >> 4) + (s >> 4) + (if lo > 9 { 1 } else { 0 });
+        if hi > 9 { adj += 0x60; }
+        let res: i64 = t + adj;
+        return res & 0xFF, if hi > 9 { 1 } else { 0 };
+    }
+    let t: i64 = d - s - cin;
+    let lo: i64 = (d & 0xF) - (s & 0xF) - cin;
+    var adj: i64 = 0;
+    if lo < 0 || lo > 9 { adj += 6; }
+    let hi: i64 = (d >> 4) - (s >> 4) - (if lo < 0 { 1 } else { 0 });
+    let a60: bool = hi < 0 || hi > 9 || (hi == 9 && lo > 9);
+    if a60 { adj += 0x60; }
+    let res: i64 = t - adj;
+    return res & 0xFF, if a60 { 1 } else { 0 };
+}
+
+fn op_bcd4(op2: i64) {
+    let sub: bool = op2 != 0x20;
+    let cnt: i64 = get_r8(1) as i64;  // digit count is CL; bytes processed = ceil(cnt/2), last one in full
+    let sbase: i64 = src_seg_base(3);
+    let dbase: i64 = (seg[0] as i64) << 4;
+    let soff: i64 = r[6] as i64;
+    let doff: i64 = r[7] as i64;
+    var carry: i64 = 0;
+    var allzero: bool = true;
+    let nb: i64 = (cnt + 1) / 2;
+    var i: i64 = 0;
+    while i < nb {
+        let db: i64 = mem[(dbase + ((doff + i) & 0xFFFF)) & 0xFFFFF] as i64;
+        let sb: i64 = mem[(sbase + ((soff + i) & 0xFFFF)) & 0xFFFFF] as i64;
+        let res, cout = bcd4_step(db, sb, carry, sub);
+        if op2 != 0x26 { wb8((dbase + ((doff + i) & 0xFFFF)) & 0xFFFFF, res as! u8); }
+        if res != 0 { allzero = false; }
+        carry = cout;
+        i += 1;
+    }
+    var f: i64 = (flags as i64) & 0xF72A;
+    if carry == 1 { f |= 1; }
+    if cnt > 0 && allzero { f |= 0x0040; }
+    flags = f as! u16;
+}
+
+fn str_digit(base: i64, off: i64, i: i64) -> i64 {
+    let b: i64 = mem[(base + ((off + (i >> 1)) & 0xFFFF)) & 0xFFFFF] as i64;
+    if (i & 1) == 0 { b & 0xF } else { (b >> 4) & 0xF }
+}
+fn set_str_digit(base: i64, off: i64, i: i64, v: i64) {
+    let a: i64 = (base + ((off + (i >> 1)) & 0xFFFF)) & 0xFFFFF;
+    let b: i64 = mem[a] as i64;
+    if (i & 1) == 0 { wb8(a, ((b & 0xF0) | v) as! u8); } else { wb8(a, ((b & 0x0F) | (v << 4)) as! u8); }
+}
+
+fn op_rol4(op2: i64) {
+    decode_modrm();
+    let cnt: i64 = get_r8(1) as i64;  // digit count is CL
+    if d_isreg || cnt <= 2 {
+        let v = read_rm(false);
+        write_rm(false, (((v << 4) | (v >> 4)) & 0xFF) as! i64);
+        return;
+    }
+    if op2 == 0x28 {  // ROL4: each digit takes the next-higher digit; the top digit wraps to the bottom
+        let save: i64 = str_digit(d_segbase, d_off, 0);
+        var i: i64 = 0;
+        while i < cnt - 1 { set_str_digit(d_segbase, d_off, i, str_digit(d_segbase, d_off, i + 1)); i += 1; }
+        set_str_digit(d_segbase, d_off, cnt - 1, save);
+    } else {  // ROR4
+        let save: i64 = str_digit(d_segbase, d_off, cnt - 1);
+        var i: i64 = cnt - 1;
+        while i > 0 { set_str_digit(d_segbase, d_off, i, str_digit(d_segbase, d_off, i - 1)); i -= 1; }
+        set_str_digit(d_segbase, d_off, 0, save);
+    }
+}
+
+fn op_bins_ext(op2: i64) {
+    // reg field = bit count minus one; r/m = the running bit offset register.
+    // BINS inserts the low bits of AX into the string at ES:DI; BEXT extracts
+    // a field from the string at DS:SI into AX.
+    decode_modrm();
+    let is_bins: bool = op2 == 0x31 || op2 == 0x39;
+    let offv: i64 = read_rm(false);
+    let cnt: i64 = if op2 == 0x39 || op2 == 0x3B { (fetch8() as i64) + 1 } else { (get_r8(d_reg) as i64) + 1 };
+    // The pointer is word-oriented: the offset register holds a bit position
+    // within the current word (0-15); SI/DI advance by 2 per full word crossed.
+    let adv: i64 = 2 * ((offv + cnt) >> 4);
+    if is_bins {
+        let axv: i64 = r[0] as i64;
+        let dbase: i64 = (seg[0] as i64) << 4;
+        let doff: i64 = r[7] as i64;
+        var k: i64 = 0;
+        while k < cnt {
+            let pos: i64 = offv + k;
+            let a: i64 = (dbase + ((doff + (pos >> 3)) & 0xFFFF)) & 0xFFFFF;
+            let b: i64 = mem[a] as i64;
+            let nb: i64 = if ((axv >> k) & 1) == 1 { b | (1 << (pos & 7)) } else { b & ~(1 << (pos & 7)) };
+            wb8(a, nb as! u8);
+            k += 1;
+        }
+        r[7] = ((doff + adv) & 0xFFFF) as! u16;
+    } else {
+        let sbase: i64 = src_seg_base(3);
+        let soff: i64 = r[6] as i64;
+        var res: i64 = 0;
+        var k: i64 = 0;
+        while k < cnt {
+            let pos: i64 = offv + k;
+            let b: i64 = mem[(sbase + ((soff + (pos >> 3)) & 0xFFFF)) & 0xFFFFF] as i64;
+            if ((b >> (pos & 7)) & 1) == 1 { res |= 1 << k; }
+            k += 1;
+        }
+        r[0] = res as! u16;
+        r[6] = ((soff + adv) & 0xFFFF) as! u16;
+    }
+    write_rm(false, (offv + cnt) & 15);
+    var f: i64 = (flags as i64) & 0xF72A;
+    if ((offv + cnt) & 15) == 0 { f |= 0x0040; }
+    flags = f as! u16;
+}
+
 // ---- Instruction slice ----
 fn exec_one() -> bool {
     seg_override = -1;
@@ -321,6 +450,33 @@ fn exec_one() -> bool {
         if op == 0x68 { let v = fetch16(); push16(v as i64); return true; }  // PUSH imm16
         if op == 0x6A { push16(s8(fetch8() as i64)); return true; }  // PUSH imm8 (sign-extended)
         if op == 0x69 || op == 0x6B { decode_modrm(); let imm: i64 = if op == 0x69 { s16(fetch16() as i64) } else { s8(fetch8() as i64) }; let prod: i64 = s16(read_rm(true)) * imm; r[d_reg] = (prod & 0xFFFF) as! u16; let cfo: i64 = if prod != s16(prod & 0xFFFF) { 1 } else { 0 }; set_cf_of(cfo, cfo); return true; }  // IMUL reg, r/m, imm
+        return false;
+    }
+    if cpu_v20 && op == 0x0F {  // NEC extended instructions
+        let op2 = fetch8();
+        if op2 >= 0x10 && op2 <= 0x1F {  // TEST1/CLR1/SET1/NOT1: bit (idx mod size) of the operand
+            let which: i64 = (op2 >> 1) & 3;  // 0 TEST1, 1 CLR1, 2 SET1, 3 NOT1
+            let size16: bool = (op2 & 1) == 1;
+            decode_modrm();
+            let idx: i64 = if op2 >= 0x18 { fetch8() as i64 } else { get_r8(1) as i64 };
+            let bit: i64 = idx & (if size16 { 15 } else { 7 });
+            let v = read_rm(size16);
+            let m: i64 = 1 << bit;
+            if which == 0 {
+                let res: i64 = v & m;
+                var f: i64 = (flags as i64) & 0xF72A;
+                if parity_even(res & 0xFF) { f |= 0x0004; }
+                if res == 0 { f |= 0x0040; }
+                if (res & (if size16 { 0x8000 } else { 0x80 })) != 0 { f |= 0x0080; }
+                flags = f as! u16;
+            } else if which == 1 { write_rm(size16, v & ~m); }
+            else if which == 2 { write_rm(size16, v | m); }
+            else { write_rm(size16, v ^ m); }
+            return true;
+        }
+        if op2 == 0x20 || op2 == 0x22 || op2 == 0x26 { op_bcd4(op2); return true; }  // ADD4S/SUB4S/CMP4S
+        if op2 == 0x28 || op2 == 0x2A { op_rol4(op2); return true; }  // ROL4/ROR4
+        if op2 == 0x31 || op2 == 0x33 || op2 == 0x39 || op2 == 0x3B { op_bins_ext(op2); return true; }  // BINS/BEXT
         return false;
     }
     if cpu_v20 && (op == 0xC0 || op == 0xC1) { decode_modrm(); let cnt: i64 = fetch8(); let size16: bool = (op & 1) == 1; let kind2: i64 = if d_reg == 6 { 4 } else { d_reg }; let v = read_rm(size16); let res = shift_op(kind2, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shift by imm8
