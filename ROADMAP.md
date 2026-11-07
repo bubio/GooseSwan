@@ -69,9 +69,15 @@ and the next step recorded in the session notes.
   Wave channels, the sweep and GDMA have since landed: the mixer
   readback ports (0x96–0x9B) are live, WSHWTest's sound sweep
   suite passes all 12 cases including the fast-sweep CPU-cycle
-  measurement, and `sst apu_test` covers GDMA (26/26). Remaining:
-  Sound DMA + HyperVoice, cartridge EEPROM, serial; the audible
-  sample stream arrives with the M5 frontend.
+  measurement, and `sst apu_test` covers GDMA (26/26). The serial
+  TX-ready latch (mono carts) plus the fitted IRQ-entry (40) and
+  HLT (12) charges have since closed WSTimingTest's last two
+  serial cases — the harvest is 400/407 with only the documented
+  quantisation/data-dependent edges left. One correction from
+  that slice: GDMA raises no interrupt (bit 3 is SERIAL_RECEIVE).
+  Remaining: Sound DMA + HyperVoice, cartridge EEPROM, serial
+  byte protocol; the audible sample stream arrives with the M5
+  frontend.
 
 ## M5 — Frontend
 - Goose gfx package (SDL3): window, input, audio out.

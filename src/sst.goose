@@ -122,6 +122,8 @@ fn port_wr(p: i64, v: i64) {
     else if p == 0xA7 { io_ports[0xAB] = v as! u8; }
     if p == 0x8E && (v & 0x08) != 0 { lfsr = 0; noise_acc = 0; io_ports[0x8E] = (v & 0xF7) as! u8; }  // SND_NOISE_CTRL reset: reseed LFSR, bit self-clears
     if p == 0x8C || p == 0x8D { sweep_ctr = 0; sweep_step = 0; }  // sweep register writes reset the sweep timer
+    if p == 0xB3 { io_ports[0xB3] = (v & 0xC4) as! u8; }  // SERIAL_CTRL: only enable/speed/overrun bits exist
+    if p == 0xB1 || p == 0xB2 || p == 0xB3 { refresh_serial(); }  // serial TX-ready level feeds INT_CAUSE bit 0
     if p == 0x48 && (v & 0x80) != 0 { run_gdma(); }  // GDMA trigger: synchronous burst on the enable write
     if p == 0xA0 { sys_ctrl1 = (sys_ctrl1 & 0x87) | (v & 0x0C); }
     else if p == 0xB5 { key_select = v & 0x70; }  // KEYPAD: only select bits 4-6 exist
@@ -408,6 +410,7 @@ fn apu_sweep_tick() {
 }
 
 var sweep_prepaid: i64 = 0;
+var ws_mono_cart: bool = false;  // set from the ROM footer in run_ws: mono-only carts get the mono serial behaviour
 
 fn sweep_advance(dc: i64) {
     if dc <= 0 { return; }
@@ -463,6 +466,23 @@ fn apu_out_port(p: i64) -> i64 {
     return (v >> ((p & 1) * 8)) & 0xFF;
 }
 
+// The serial TX-ready cause is a level, not a baud timer: with the
+// serial port enabled (SERIAL_CTRL bit 7) and the SERIAL_SEND
+// interrupt enabled, INT_CAUSE bit 0 reads as permanently pending
+// (the UART is always ready to send). It is re-evaluated on writes
+// to the serial data/enable/ctrl ports and cleared only via
+// INT_CAUSE_CLEAR, matching Swanium's refresh model — and it is
+// exactly what WSTimingTest's HLT and IRQ loops measure: their
+// handler never acknowledges, so the cause must simply stay up.
+fn refresh_serial() {
+    // The instant TX-ready latch is a mono-machine behaviour (Swanium
+    // gates it the same way). On colour carts it must NOT fire:
+    // WSHWTest's IO-register test pattern-writes INT_ENABLE = 0xFF
+    // with the serial left enabled, and an instantly-pending
+    // non-acknowledged IRQ would livelock that test on the spot.
+    if ws_mono_cart && ((io_ports[0xB2] as i64) & 1) != 0 && ((io_ports[0xB3] as i64) & 0x80) != 0 { int_cause |= 0x01; }
+}
+
 fn run_gdma() {
     var src: i64 = (((io_ports[0x42] as i64) & 0x0F) << 16) | ((io_ports[0x40] as i64) | ((io_ports[0x41] as i64) << 8));
     var dst: i64 = (io_ports[0x44] as i64) | ((io_ports[0x45] as i64) << 8);
@@ -486,7 +506,6 @@ fn run_gdma() {
     io_ports[0x46] = (len & 0xFF) as! u8;
     io_ports[0x47] = ((len >> 8) & 0xFF) as! u8;
     io_ports[0x48] = ((io_ports[0x48] as i64) & 0x7F) as! u8;
-    int_cause |= 0x08 & (io_ports[0xB2] as i64);
     if moved > 0 { ws_cycles += 5 + moved; }
 }
 
@@ -532,7 +551,7 @@ fn init_cyc() {
     for i in 8 { cyc_tab[0xD8 + i] = 1; }
     cyc_tab[0xE4] = 7; cyc_tab[0xE5] = 7; cyc_tab[0xE6] = 7; cyc_tab[0xE7] = 7; cyc_tab[0xEC] = 5; cyc_tab[0xED] = 5; cyc_tab[0xEE] = 5; cyc_tab[0xEF] = 5;
     cyc_tab[0xE8] = 3; cyc_tab[0xE9] = 2; cyc_tab[0xEA] = 5; cyc_tab[0xEB] = 2;
-    cyc_tab[0xF1] = 1; cyc_tab[0xF5] = 4; cyc_tab[0xF6] = 5; cyc_tab[0xF7] = 5; cyc_tab[0xFE] = 3; cyc_tab[0xFF] = 5;
+    cyc_tab[0xF1] = 1; cyc_tab[0xF4] = 12; cyc_tab[0xF5] = 4; cyc_tab[0xF6] = 5; cyc_tab[0xF7] = 5; cyc_tab[0xFE] = 3; cyc_tab[0xFF] = 5;
     cyc_tab[0xF8] = 4; cyc_tab[0xF9] = 4; cyc_tab[0xFA] = 4; cyc_tab[0xFB] = 4; cyc_tab[0xFC] = 4; cyc_tab[0xFD] = 4;
 }
 
@@ -654,14 +673,15 @@ fn est_cycles(pre_cx: i64) -> i64 {
 // Deliver the highest-priority pending hardware interrupt, if any is
 // enabled and IF is set. Cause bits stay set until software clears them
 // through port B6, as on hardware.
-fn ws_deliver_int() {
+fn ws_deliver_int() -> bool {
     let pending: i64 = int_cause & (io_ports[0xB2] as i64);
-    if pending == 0 { return; }
+    if pending == 0 { return false; }
     cpu_halted = false;  // a pending enabled interrupt wakes HLT even with IF=0 (it just isn't serviced then; WSTimingTest's HLT case relies on this)
-    if (flags & 0x0200) == 0 { return; }
+    if (flags & 0x0200) == 0 { return false; }
     var bit: i64 = 7;
     while bit > 0 && ((pending >> bit) & 1) == 0 { bit -= 1; }
     do_int(((io_ports[0xB0] as i64) & 0xF8) + bit);
+    return true;
 }
 
 // Memory written during a case, so the next case can restore zeros.
@@ -1737,6 +1757,7 @@ fn run_ws(path: u8[:]) {
     cpu_v20 = true;
     cpu_mz = true;
     guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
+    if rom.len > 16 { ws_mono_cart = (rom[rom.len - 9] as i64) == 0; }
     print("rom loaded: ", rom.len, " bytes");
     for i in 1048576 { mem[i] = 0; }
     for i in 256 { io_ports[i] = 0; }
@@ -1796,7 +1817,7 @@ fn run_ws(path: u8[:]) {
         prev_keys = keys_state;
         var spent: i64 = 0;
         while spent < 40704 {
-            ws_deliver_int();
+            if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
             if (flags & 0x0100) != 0 && dbg_op != 0x9D && dbg_op != 0xCF { do_int(1); ws_cycles += 33; spent += 33; }  // TF single-step trap (entry charge fitted from WSTimingTest's trap case)
             if !cpu_halted {
                 let pre_cx: i64 = r[1] as i64;
@@ -1907,7 +1928,7 @@ fn apu_test() {
     apu_check("gdma byte3", mem[0x3003] as i64, 4);
     apu_check("gdma len drained", io_ports[0x46] as i64, 0);
     apu_check("gdma enable cleared", (io_ports[0x48] as i64) & 0x80, 0);
-    apu_check("gdma cause latched", int_cause & 0x08, 0x08);
+    apu_check("gdma raises no cause", int_cause & 0x08, 0);
     // GDMA decrement copy
     io_ports[0x40] = 0x03; io_ports[0x41] = 0x20;
     io_ports[0x44] = 0x13; io_ports[0x45] = 0x30;
@@ -1943,6 +1964,26 @@ fn apu_test() {
     dbg_op = 0xE5;
     apu_check("fast sweep meas2", port_rd(0x84) | (port_rd(0x85) << 8), 266);
     ws_mode = false;
+    // Serial TX-ready level: latches when serial + its IRQ are on (mono carts)
+    ws_mono_cart = true;
+    apu_reset_state();
+    port_wr(0xB3, 0xC0);
+    apu_check("serial no latch before enable", int_cause & 1, 0);
+    port_wr(0xB2, 0x01);
+    apu_check("serial latched by int enable", int_cause & 1, 1);
+    port_wr(0xB6, 0xFF);
+    apu_check("serial ack clears", int_cause & 1, 0);
+    apu_reset_state();
+    port_wr(0xB2, 0x01);
+    apu_check("serial no latch before ctrl", int_cause & 1, 0);
+    port_wr(0xB3, 0xC0);
+    apu_check("serial latched by ctrl enable", int_cause & 1, 1);
+    apu_check("serial ctrl mask", io_ports[0xB3] as i64, 0xC0);
+    ws_mono_cart = false;
+    apu_reset_state();
+    port_wr(0xB3, 0xC0);
+    port_wr(0xB2, 0x01);
+    apu_check("serial no latch on colour carts", int_cause & 1, 0);
     print("apu_test: ", apu_pass, " passed, ", apu_fail, " failed");
 }
 

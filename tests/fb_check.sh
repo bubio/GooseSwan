@@ -15,7 +15,12 @@ check() {
         fail=1
     fi
 }
-check tests/roms/WSHWTest.wsc m1 928216367990215109
+# The m1 golden is stop-point sensitive: Test All ends in a key wait,
+# and whether the runner stops on the results screen or back at the
+# menu depends on exact cycle counts (the auto-dismiss race). It was
+# re-recorded after the IRQ-entry charge landed (results screen ->
+# menu); Test All itself completes failure-free either way.
+check tests/roms/WSHWTest.wsc m1 -295421874257209499
 check tests/roms/WSHWTest.wsc m7 -8074856431574525435
 check tests/roms/WSTimingTest.ws pg0 -7186274187880256422
 rm -f framebuffer.ppm
