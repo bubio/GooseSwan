@@ -102,6 +102,7 @@ fn port_wr(p: i64, v: i64) {
     else if p == 0xA7 { io_ports[0xAB] = v as! u8; }
     if p == 0x8E && (v & 0x08) != 0 { lfsr = 0; noise_acc = 0; io_ports[0x8E] = (v & 0xF7) as! u8; }  // SND_NOISE_CTRL reset: reseed LFSR, bit self-clears
     if p == 0x8C || p == 0x8D { sweep_ctr = 0; sweep_step = 0; }  // sweep register writes reset the sweep timer
+    if p == 0x89 { voice_feed(v); }  // voice data latch: feeds the reconstruction low-pass while voice mode is on
     if !ws_mono_cart && p >= 0x64 && p <= 0x67 { io_ports[0x69] = 0; }  // HyperVoice direct write clears the data latch (colour only)
     if !ws_mono_cart && p == 0x69 { io_ports[0x64] = 0; io_ports[0x65] = 0; io_ports[0x66] = 0; io_ports[0x67] = 0; }  // HyperVoice data write clears the direct words
     if p == 0xB3 { io_ports[0xB3] = (v & 0xC4) as! u8; }  // SERIAL_CTRL: only enable/speed/overrun bits exist
@@ -204,8 +205,9 @@ fn sdma_writeback() {
 
 fn sdma_step() {
     let ctrl: i64 = io_ports[0x52] as i64;
-    if (ctrl & 0x04) != 0 { io_ports[0x89] = 0; return; }  // HOLD: latch silence, pointers stay
-    io_ports[0x89] = rd8(sdma_source);
+    if (ctrl & 0x04) != 0 { io_ports[0x89] = 0; voice_feed(0); return; }  // HOLD: latch silence, pointers stay
+    let sb: i64 = rd8(sdma_source);
+    io_ports[0x89] = sb as! u8; voice_feed(sb);
     if (ctrl & 0x40) != 0 { sdma_source = (sdma_source - 1) & 0xFFFFF; } else { sdma_source = (sdma_source + 1) & 0xFFFFF; }
     sdma_counter = (sdma_counter - 1) & 0xFFFFF;
     if sdma_counter == 0 {
@@ -519,7 +521,9 @@ fn run_ws(path: u8[:]) {
     var page_done: i64 = 0;
     var page_hold: i64 = 0;
     var fb_dump: bool = false;
-    if argv2.len > 4 && argv2[4] == "fb" { fb_dump = true; }
+    if argv2.len > 4 && (argv2[4] == "fb" || argv2[4] == "fbwav") { fb_dump = true; }
+    var wav_dump: bool = false;
+    if argv2.len > 4 && (argv2[4] == "wav" || argv2[4] == "fbwav") { wav_dump = true; aud_enabled = true; }
     while frame < 2000000 && !done {
         keys_state = 0;
         if skip_hold > 0 { keys_state = 1 << 11; skip_hold -= 1; }
@@ -567,6 +571,7 @@ fn run_ws(path: u8[:]) {
     let m = ws_screen_text(screen);
     write_stdout(screen[..m]);
     if fb_dump { print("fbhash=", fb_hash()); fb_write_ppm(); print("framebuffer written to framebuffer.ppm"); }
+    if wav_dump { wav_write(); print("audio written to audio.wav samples=", aud_buf.len / 2); }
 }
 
 var ws_mono_cart: bool = false;  // set from the ROM footer in run_ws: mono-only carts get the mono serial behaviour

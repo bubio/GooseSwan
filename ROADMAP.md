@@ -84,3 +84,7 @@ and the next step recorded in the session notes.
 ## M5 — Frontend
 - Goose gfx package (SDL3): window, input, audio out.
 - Done when: a distributable build plays games end to end.
+- Status 2026-11-08: the audio sample stream has landed
+  (24 kHz stereo, Swanium's output model, `sst apu_test` 83/83,
+  `ws <rom> <suite> wav` writes audio.wav). Remaining: the SDL3
+  window + input, save-data persistence, a real game end to end.

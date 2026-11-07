@@ -92,6 +92,80 @@ fn apu_tick(dc: i64) {
     var sdc: i64 = dc - sweep_prepaid;
     sweep_prepaid = 0;
     if sdc > 0 { sweep_advance(sdc); }
+    if aud_enabled {
+        aud_acc += dc;
+        while aud_acc >= 128 { aud_acc -= 128; audio_emit(); }
+    }
+}
+
+// ---- Audio sample stream (M5): one stereo sample per 128 CPU
+// cycles (24 kHz), following Swanium's apu output model. mix_waves
+// sums sample x volume nibbles per side and scales by 32; the voice
+// channel contributes its low-passed level routed by port 0x94 and
+// scaled by 64; HyperVoice sums into the same domain; port 0x91
+// then selects stereo (bit 7) or the mono speaker sum with its
+// volume shift. Emission is gated by aud_enabled so the headless
+// test runners pay nothing; the frontend will drain aud_buf.
+var aud_enabled: bool = false;
+var aud_acc: i64 = 0;
+var aud_buf: i64[>..] = [];
+var voice_lp_prev: i64 = 0;
+var voice_level: i64 = 0;
+
+fn voice_feed(v: i64) {
+    if ((io_ports[0x90] as i64) & 0x20) != 0 {
+        let x: i64 = v - 0x80;
+        voice_level = (x + voice_lp_prev) / 2;
+        voice_lp_prev = x;
+    }
+}
+
+fn clamp16(v: i64) -> i64 { if v > 32767 { return 32767; } if v < -32768 { return -32768; } return v; }
+
+fn audio_emit() {
+    let ctrl: i64 = io_ports[0x90] as i64;
+    var wl: i64 = 0; var wr: i64 = 0;
+    for ch in 4 {
+        if (ctrl & (1 << ch)) == 0 { continue; }
+        if ch == 1 && (ctrl & 0x20) != 0 { continue; }
+        var s: i64 = ch_sample[ch];
+        if ch == 3 && (ctrl & 0x80) != 0 && ((io_ports[0x8E] as i64) & 0x10) != 0 && (ctrl & 0x88) == 0x88 { if (lfsr & 1) != 0 { s = 15; } else { s = 0; } }
+        let vol: i64 = io_ports[0x88 + ch] as i64;
+        wl += s * (vol >> 4); wr += s * (vol & 0x0F);
+    }
+    wl *= 32; wr *= 32;
+    var vl: i64 = 0; var vr: i64 = 0;
+    if (ctrl & 0x20) != 0 {
+        let vv: i64 = io_ports[0x94] as i64;
+        if (vv & 0x04) != 0 { vl = voice_level; } else if (vv & 0x08) != 0 { vl = voice_level >> 1; }
+        if (vv & 0x01) != 0 { vr = voice_level; } else if (vv & 0x02) != 0 { vr = voice_level >> 1; }
+        vl *= 64; vr *= 64;
+    } else { voice_lp_prev = 0; voice_level = 0; }
+    let hl, hr = hv_output();
+    var l: i64 = wl + vl + hl; var r: i64 = wr + vr + hr;
+    let oc: i64 = io_ports[0x91] as i64;
+    if (oc & 0x80) != 0 { l = clamp16(l); r = clamp16(r); }
+    else { let m: i64 = clamp16((l + r) >> ((oc >> 1) & 3)); l = m; r = m; }
+    aud_buf.push(l); aud_buf.push(r);
+}
+
+fn wav_write() {
+    var w: u8[>..] = [];
+    let data_bytes: i64 = aud_buf.len * 2;
+    let riff = "RIFF"; for i in riff.len { w.push(riff[i]); }
+    let chunk: i64 = 36 + data_bytes;
+    w.push((chunk & 0xFF) as! u8); w.push(((chunk >> 8) & 0xFF) as! u8); w.push(((chunk >> 16) & 0xFF) as! u8); w.push(((chunk >> 24) & 0xFF) as! u8);
+    let wave = "WAVE"; for i in wave.len { w.push(wave[i]); }
+    let fmt = "fmt "; for i in fmt.len { w.push(fmt[i]); }
+    w.push(16); w.push(0); w.push(0); w.push(0);
+    w.push(1); w.push(0); w.push(2); w.push(0);
+    w.push(0xC0); w.push(0x5D); w.push(0); w.push(0);
+    w.push(0x80); w.push(0xBB); w.push(0); w.push(0);
+    w.push(4); w.push(0); w.push(16); w.push(0);
+    let data = "data"; for i in data.len { w.push(data[i]); }
+    w.push((data_bytes & 0xFF) as! u8); w.push(((data_bytes >> 8) & 0xFF) as! u8); w.push(((data_bytes >> 16) & 0xFF) as! u8); w.push(((data_bytes >> 24) & 0xFF) as! u8);
+    for i in aud_buf.len { let v: i64 = aud_buf[i]; w.push((v & 0xFF) as! u8); w.push(((v >> 8) & 0xFF) as! u8); }
+    write_file("audio.wav", w);
 }
 
 // Port accesses land partway through an IN/OUT instruction, not at
@@ -178,6 +252,7 @@ fn apu_reset_state() {
     for ch in 4 { ch_period[ch] = 0; ch_idx[ch] = 0; ch_sample[ch] = 0; }
     sweep_ctr = 0; sweep_step = 0; fast_primed = false;
     sdma_running = false; sdma_clock = 0;
+    aud_acc = 0; voice_lp_prev = 0; voice_level = 0; aud_buf = [];
     lfsr = 0; noise_acc = 0; int_cause = 0; ws_cycles = 0;
     init_io_masks();
 }
@@ -392,5 +467,57 @@ fn apu_test() {
     let sl, sr = hv_output();
     apu_check("hv speed bits ignored L", sl, 16384);
     apu_check("hv speed bits ignored R", sr, 16384);
+    // Audio sample stream: wave mix, output control, cadence (24 kHz)
+    apu_reset_state();
+    aud_enabled = true;
+    for i in 16 { mem[i] = 0xFF; }
+    io_ports[0x80] = 0xFF; io_ports[0x81] = 0x07;
+    io_ports[0x88] = 0xFF;
+    io_ports[0x90] = 0x01;
+    io_ports[0x91] = 0x80;
+    apu_tick(128);
+    apu_check("aud one sample per 128 cycles", aud_buf.len, 2);
+    apu_check("aud wave L", aud_buf[0], 7200);
+    apu_check("aud wave R", aud_buf[1], 7200);
+    io_ports[0x91] = 0x00;
+    apu_tick(128);
+    apu_check("aud speaker sums", aud_buf[2], 14400);
+    io_ports[0x91] = 0x02;
+    apu_tick(128);
+    apu_check("aud speaker shift", aud_buf[4], 7200);
+    apu_tick(5);
+    apu_check("aud cadence holds remainder", aud_buf.len, 6);
+    apu_tick(123);
+    apu_check("aud cadence completes sample", aud_buf.len, 8);
+    aud_enabled = false;
+    // Voice channel: write-fed low-pass, port 0x94 routing, x64 scale
+    apu_reset_state();
+    aud_enabled = true;
+    io_ports[0x90] = 0x20;
+    port_wr(0x89, 0xFF);
+    apu_check("voice lp first average", voice_level, 63);
+    port_wr(0x89, 0xFF);
+    apu_check("voice lp settles", voice_level, 127);
+    io_ports[0x94] = 0x05;
+    io_ports[0x91] = 0x80;
+    apu_tick(128);
+    apu_check("aud voice L", aud_buf[0], 8128);
+    apu_check("aud voice R", aud_buf[1], 8128);
+    aud_enabled = false;
+    // HyperVoice in the stream, and the mono clamp
+    apu_reset_state();
+    aud_enabled = true;
+    io_ports[0x60] = 0x80;
+    io_ports[0x6A] = 0x80; io_ports[0x69] = 0x40; io_ports[0x6B] = 0x40;
+    io_ports[0x91] = 0x80;
+    apu_tick(128);
+    apu_check("aud hv L", aud_buf[0], 16384);
+    apu_check("aud hv R silent", aud_buf[1], 0);
+    io_ports[0x64] = 0xFF; io_ports[0x65] = 0x7F; io_ports[0x66] = 0xFF; io_ports[0x67] = 0x7F;
+    io_ports[0x91] = 0x00;
+    apu_tick(128);
+    apu_check("aud mono clamps L", aud_buf[2], 32767);
+    apu_check("aud mono clamps R", aud_buf[3], 32767);
+    aud_enabled = false;
     print("apu_test: ", apu_pass, " passed, ", apu_fail, " failed");
 }
