@@ -168,6 +168,134 @@ fn noise_tick(dc: i64) {
     noise_acc += dc;
     while noise_acc >= period { noise_acc -= period; step_lfsr(); }
 }
+
+// ---- PPU: background rendering (SCR1/SCR2 + windows, mono and colour) ----
+// Model follows Swanium's ppu module: the framebuffer holds one RGB444
+// value per pixel (224x144). Lines are rendered as they complete in
+// ws_line_events, from live ports/RAM. Sprites are not rendered yet.
+var fb: u16[32256] = [0; 32256];
+
+fn ppu_color_mode() -> bool { return ((io_ports[0x60] as i64) & 0x80) != 0; }
+
+fn ppu_tile_pixel(tile: i64, tx: i64, ty: i64) -> i64 {
+    let vm: i64 = io_ports[0x60] as i64;
+    if (vm & 0x80) != 0 && (vm & 0x40) != 0 {
+        let base: i64 = 0x4000 + tile * 32 + ty * 4;
+        if (vm & 0x20) != 0 {
+            let b: i64 = mem[base + (tx >> 1)] as i64;
+            if (tx & 1) == 0 { return (b >> 4) & 15; }
+            return b & 15;
+        }
+        var px: i64 = 0;
+        let bit: i64 = 7 - tx;
+        for pl in 4 { px |= (((mem[base + pl] as i64) >> bit) & 1) << pl; }
+        return px;
+    }
+    let a: i64 = 0x2000 + tile * 16 + ty * 2;
+    let bit2: i64 = 7 - tx;
+    let lo: i64 = ((mem[a] as i64) >> bit2) & 1;
+    let hi: i64 = ((mem[a + 1] as i64) >> bit2) & 1;
+    return (hi << 1) | lo;
+}
+
+fn ppu_shade(idx: i64) -> i64 {
+    let b: i64 = io_ports[0x1C + (idx >> 1)] as i64;
+    if (idx & 1) == 0 { return b & 15; }
+    return (b >> 4) & 15;
+}
+
+fn ppu_grey(shade: i64) -> i64 { let n: i64 = 15 - (shade & 15); return (n << 8) | (n << 4) | n; }
+
+fn ppu_resolve_mono(pal: i64, pixel: i64) -> i64 {
+    let b: i64 = io_ports[0x20 + pal * 2 + (pixel >> 1)] as i64;
+    var pool: i64 = (b >> 4) & 7;
+    if (pixel & 1) == 0 { pool = b & 7; }
+    return ppu_grey(ppu_shade(pool));
+}
+
+fn ppu_resolve_color(pal: i64, pixel: i64) -> i64 {
+    let a: i64 = 0xFE00 + (pal * 16 + pixel) * 2;
+    return ((mem[a] as i64) | ((mem[a + 1] as i64) << 8)) & 0xFFF;
+}
+
+fn ppu_resolve(pal: i64, pixel: i64) -> i64 {
+    if ppu_color_mode() { return ppu_resolve_color(pal, pixel); }
+    return ppu_resolve_mono(pal, pixel);
+}
+
+fn ppu_transparent(pal: i64, pixel: i64) -> bool {
+    if pixel != 0 { return false; }
+    if ppu_color_mode() { return true; }
+    return !((pal >= 0 && pal <= 3) || (pal >= 8 && pal <= 11));
+}
+
+fn ppu_backdrop() -> i64 {
+    let b: i64 = io_ports[0x01] as i64;
+    if ppu_color_mode() { return ppu_resolve_color(b >> 4, b & 15); }
+    return ppu_grey(ppu_shade(b & 7));
+}
+
+fn ppu_bg_sample(layer: i64, x: i64, y: i64) -> i64, i64 {
+    var sx: i64 = io_ports[0x10] as i64;
+    var sy: i64 = io_ports[0x11] as i64;
+    var nib: i64 = (io_ports[0x07] as i64) & 0x0F;
+    if layer == 1 { sx = io_ports[0x12] as i64; sy = io_ports[0x13] as i64; nib = ((io_ports[0x07] as i64) >> 4) & 0x0F; }
+    if !ppu_color_mode() { nib = nib & 7; }
+    let base: i64 = nib << 11;
+    let bgx: i64 = (x + sx) & 0xFF;
+    let bgy: i64 = (y + sy) & 0xFF;
+    let ea: i64 = base + (((bgy >> 3) * 32) + (bgx >> 3)) * 2;
+    let w: i64 = (mem[ea] as i64) | ((mem[ea + 1] as i64) << 8);
+    var tile: i64 = w & 0x1FF;
+    if ppu_color_mode() && (w & 0x2000) != 0 { tile += 512; }
+    let pal: i64 = (w >> 9) & 0x0F;
+    var tx: i64 = bgx & 7;
+    var ty: i64 = bgy & 7;
+    if (w & 0x4000) != 0 { tx = 7 - tx; }
+    if (w & 0x8000) != 0 { ty = 7 - ty; }
+    return ppu_tile_pixel(tile, tx, ty), pal;
+}
+
+fn ppu_scr2_visible(x: i64, y: i64) -> bool {
+    let dc: i64 = io_ports[0x00] as i64;
+    if (dc & 0x20) == 0 { return true; }
+    let inside: bool = x >= (io_ports[0x08] as i64) && x <= (io_ports[0x0A] as i64) && y >= (io_ports[0x09] as i64) && y <= (io_ports[0x0B] as i64);
+    if (dc & 0x10) != 0 { return !inside; }
+    return inside;
+}
+
+fn render_line(y: i64) {
+    if y < 0 || y >= 144 { return; }
+    let dc: i64 = io_ports[0x00] as i64;
+    let bd: i64 = ppu_backdrop();
+    let row: i64 = y * 224;
+    for x in 224 {
+        var c: i64 = bd;
+        if (dc & 1) != 0 { let px, pal = ppu_bg_sample(0, x, y); if !ppu_transparent(pal, px) { c = ppu_resolve(pal, px); } }
+        if (dc & 2) != 0 && ppu_scr2_visible(x, y) { let px2, pal2 = ppu_bg_sample(1, x, y); if !ppu_transparent(pal2, px2) { c = ppu_resolve(pal2, px2); } }
+        fb[row + x] = c as! u16;
+    }
+}
+
+fn fb_hash() -> i64 {
+    var h: i64 = 5381;
+    for i in 32256 { h = ((h << 5) + h) ^ (fb[i] as i64); }
+    return h;
+}
+
+fn fb_write_ppm() {
+    var ppm: u8[>..] = [];
+    let hdr = "P6\n224 144\n255\n";
+    for i in hdr.len { ppm.push(hdr[i]); }
+    for i in 32256 {
+        let c: i64 = fb[i] as i64;
+        ppm.push((((c >> 8) & 15) * 17) as! u8);
+        ppm.push((((c >> 4) & 15) * 17) as! u8);
+        ppm.push(((c & 15) * 17) as! u8);
+    }
+    write_file("framebuffer.ppm", ppm);
+}
+
 fn ws_line_events() {
     noise_tick(ws_cycles - last_tick); last_tick = ws_cycles;
     let line: i64 = (ws_cycles % 40704) / 256;
@@ -175,6 +303,8 @@ fn ws_line_events() {
         last_line += 1; if last_line >= 159 { last_line = 0; }
         tick_hbl();
         if last_line == 144 { tick_vbl(); }
+        var completed: i64 = last_line - 1; if completed < 0 { completed += 159; }
+        if completed < 144 { render_line(completed); }
     }
 }
 fn init_cyc() {
@@ -1222,6 +1352,106 @@ fn count_ok(buf: u8[:], n: i64) -> i64 {
 // driven test ROMs start their "Test All". Stops when the screen shows
 // "Ok" at least 7 times (one per suite), when the screen has been frozen
 // for 600 frames (a failure stop inside the ROM), or at the frame cap.
+
+// ---- PPU synthetic self-test (sst ppu_test) ----
+// Hand-built scenes with hand-computed expected pixels: mono palettes and
+// transparency, scroll, hflip, SCR2 windowing, colour palette RAM, the
+// tile-bank bit and 4bpp packed tiles.
+var ppu_pass: i64 = 0;
+var ppu_fail: i64 = 0;
+
+fn ppu_check(name: u8[:], got: i64, exp: i64) {
+    if got == exp { ppu_pass += 1; } else { ppu_fail += 1; print("PPU FAIL ", name, ": got ", got, " expected ", exp); }
+}
+
+fn ppu_clear() {
+    for i in 256 { io_ports[i] = 0; }
+    for i in 65536 { mem[i] = 0; }
+    for i in 32256 { fb[i] = 0; }
+}
+
+fn ppu_set16(addr: i64, w: i64) { mem[addr] = (w & 0xFF) as! u8; mem[addr + 1] = ((w >> 8) & 0xFF) as! u8; }
+
+fn ppu_setup_mono() {
+    io_ports[0x1C] = 0x0F;
+    io_ports[0x1D] = 0x37;
+    io_ports[0x01] = 2;
+    io_ports[0x20] = 0x10; io_ports[0x21] = 0x32;
+    io_ports[0x28] = 0x10; io_ports[0x29] = 0x32;
+    mem[0x2000 + 16] = 0xAA; mem[0x2000 + 17] = 0xCC;
+}
+
+fn ppu_test() {
+    // Scene 1: mono SCR1 (tile 1 row 0 = pixels 3,2,1,0,3,2,1,0)
+    ppu_clear();
+    ppu_setup_mono();
+    ppu_set16(0, 1);
+    ppu_set16(2, 1 | (4 << 9) | (1 << 14));
+    io_ports[0x00] = 1;
+    io_ports[0x07] = 0;
+    render_line(0);
+    ppu_check("s1 x0 pix3", fb[0] as i64, 0xCCC);
+    ppu_check("s1 x1 pix2", fb[1] as i64, 0x888);
+    ppu_check("s1 x2 pix1", fb[2] as i64, 0xFFF);
+    ppu_check("s1 x3 pix0 pal0 opaque", fb[3] as i64, 0x000);
+    ppu_check("s1 x8 pal4 flipped pix0 transparent", fb[8] as i64, 0x888);
+    ppu_check("s1 x11 pal4 flipped pix3", fb[11] as i64, 0xCCC);
+    ppu_check("s1 x100 empty entry", fb[100] as i64, 0x000);
+    io_ports[0x10] = 8;
+    render_line(0);
+    ppu_check("s1 scroll x0", fb[0] as i64, 0x888);
+    ppu_check("s1 scroll x3", fb[3] as i64, 0xCCC);
+    ppu_check("s1 scroll x8", fb[8] as i64, 0x000);
+    // Scene 2: SCR2 window (tile 2 = all pixel 1 -> 0xFFF)
+    ppu_clear();
+    ppu_setup_mono();
+    mem[0x2000 + 32] = 0xFF; mem[0x2000 + 33] = 0x00;
+    ppu_set16(0, 1);
+    io_ports[0x07] = 0x10;
+    ppu_set16(0x800, 2);
+    io_ports[0x08] = 0; io_ports[0x09] = 0; io_ports[0x0A] = 3; io_ports[0x0B] = 0;
+    io_ports[0x00] = 1 | 2 | 0x20;
+    render_line(0);
+    ppu_check("s2 x0 scr2 inside", fb[0] as i64, 0xFFF);
+    ppu_check("s2 x1 scr2 inside", fb[1] as i64, 0xFFF);
+    ppu_check("s2 x4 scr1 outside", fb[4] as i64, 0xCCC);
+    io_ports[0x00] = 1 | 2 | 0x20 | 0x10;
+    render_line(0);
+    ppu_check("s2 x0 scr1 outside-mode", fb[0] as i64, 0xCCC);
+    ppu_check("s2 x4 scr2 outside-mode", fb[4] as i64, 0xFFF);
+    // Scene 3: colour mode
+    ppu_clear();
+    io_ports[0x60] = 0x80;
+    io_ports[0x01] = 0x05;
+    ppu_set16(0xFE00 + 2, 0x123);
+    ppu_set16(0xFE00 + 4, 0x0F0);
+    ppu_set16(0xFE00 + 6, 0xF00);
+    ppu_set16(0xFE00 + 10, 0xABC);
+    mem[0x2000 + 16] = 0xAA; mem[0x2000 + 17] = 0xCC;
+    ppu_set16(0, 1);
+    io_ports[0x00] = 1;
+    io_ports[0x07] = 0;
+    render_line(0);
+    ppu_check("s3 x0 color3", fb[0] as i64, 0xF00);
+    ppu_check("s3 x1 color2", fb[1] as i64, 0x0F0);
+    ppu_check("s3 x2 color1", fb[2] as i64, 0x123);
+    ppu_check("s3 x3 transparent backdrop", fb[3] as i64, 0xABC);
+    mem[0x2000 + 513 * 16] = 0xFF; mem[0x2000 + 513 * 16 + 1] = 0xFF;
+    ppu_set16(2, 1 | (1 << 13));
+    render_line(0);
+    ppu_check("s3 x8 bank tile", fb[8] as i64, 0xF00);
+    io_ports[0x60] = 0x80 | 0x40 | 0x20;
+    mem[0x4000 + 32] = 0x12; mem[0x4000 + 33] = 0x34; mem[0x4000 + 34] = 0x56; mem[0x4000 + 35] = 0x78;
+    for k in 8 { ppu_set16(0xFE00 + (k + 1) * 2, (k + 1) * 0x111); }
+    ppu_set16(2, 0);
+    render_line(0);
+    ppu_check("s3 4bpp x0", fb[0] as i64, 0x111);
+    ppu_check("s3 4bpp x1", fb[1] as i64, 0x222);
+    ppu_check("s3 4bpp x6", fb[6] as i64, 0x777);
+    ppu_check("s3 4bpp x7", fb[7] as i64, 0x888);
+    print("ppu_test: ", ppu_pass, " passed, ", ppu_fail, " failed");
+}
+
 fn run_ws(path: u8[:]) {
     ws_mode = true;
     cpu_v20 = true;
@@ -1266,6 +1496,8 @@ fn run_ws(path: u8[:]) {
     var dismiss: i64 = 0;
     var page_done: i64 = 0;
     var page_hold: i64 = 0;
+    var fb_dump: bool = false;
+    if argv2.len > 4 && argv2[4] == "fb" { fb_dump = true; }
     while frame < 2000000 && !done {
         keys_state = 0;
         if skip_hold > 0 { keys_state = 1 << 11; skip_hold -= 1; }
@@ -1312,12 +1544,14 @@ fn run_ws(path: u8[:]) {
     print("state: cs:ip=", seg[1], ":", ip, " ax=", r[0], " bx=", r[2], " cx=", r[1], " dx=", r[3], " sp=", r[4], " bp=", r[5], " si=", r[6], " di=", r[7], " flags=", flags, " halted=", cpu_halted, " line=", (ws_cycles % 40704) / 256, " cause=", int_cause, " enable=", io_ports[0xB2], " scr_area=", io_ports[0x07], " p60=", io_ports[0x60], " p01raw=", io_ports[0x01], " p01rd=", port_rd(1));
     let m = ws_screen_text(screen);
     write_stdout(screen[..m]);
+    if fb_dump { print("fbhash=", fb_hash()); fb_write_ppm(); print("framebuffer written to framebuffer.ppm"); }
 }
 
 fn main() {
     let argv = args();
     if argv.len < 2 { print("usage: sst [v20] <case-file.json> [more files...] | sst ws <rom.ws|wsc>"); exit(1); }
     if argv[1] == "ws" { run_ws(argv[2]); return; }
+    if argv[1] == "ppu_test" { ppu_test(); return; }
     var start: i64 = 1;
     if argv[1] == "v20" { cpu_v20 = true; start = 2; }
     for i in start..argv.len { run_file(argv[i]); }

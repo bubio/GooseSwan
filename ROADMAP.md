@@ -51,7 +51,11 @@ and the next step recorded in the session notes.
   partials) and WSTimingTest passes 398/406 cases across all 29
   pages; the 8 misses are documented (two need a serial TX timing
   model, the rest are sub-line quantization/data-dependent edges).
-  Rendering itself has not started.
+  Background rendering has landed: SCR1/SCR2 with windows, mono and
+  colour palettes, 2bpp/4bpp tiles, rendered per completed scanline
+  into an RGB444 framebuffer, with a `ppu_test` synthetic suite
+  (24/24), an `fb` dump/hash harness arg, and the WSHWTest Test All
+  and Test Windows screens rendering correctly. Sprites are next.
 
 ## M4 — Peripherals (in progress)
 - APU, timers, interrupts, DMA.
