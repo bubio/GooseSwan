@@ -6,5 +6,6 @@
 
 # Test data (large corpora and ROMs are fetched, not committed)
 tests/data/
+tests/data-v20/
 *.ws
 *.wsc

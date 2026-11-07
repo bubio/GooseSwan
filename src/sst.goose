@@ -39,7 +39,8 @@ fn set_r8(i: i64, v: u8) {
 
 // ---- ModRM decode (16-bit addressing) ----
 var seg_override: i64 = -1;  // segment override prefix, -1 = none
-var rep_prefix: i64 = 0;  // 0 = none, 2 = REPNE (F2), 3 = REP/REPE (F3)
+var rep_prefix: i64 = 0;  // 0 = none, 2 = REPNE (F2), 3 = REP/REPE (F3), 4 = V20 rep-while-CF=0 (64), 5 = V20 rep-while-CF=1 (65)
+var cpu_v20: bool = false;  // NEC V20 profile, selected by the "v20" CLI argument
 var d_reg: i64 = 0;
 var d_isreg: bool = false;
 var d_regidx: i64 = 0;
@@ -223,7 +224,7 @@ fn shift_op(kind: i64, v: i64, count: i64, bits: i64) -> i64 {
     if res == 0 { f |= 0x0040; }
     if (res & (1 << top)) != 0 { f |= 0x0080; }
     if kind == 4 {  // SHL: AF is bit 3 of the pre-final value (= bit 4 of the result); OF as for one bit
-        if ((res >> 4) & 1) == 1 { f |= 0x0010; }
+        if !cpu_v20 && ((res >> 4) & 1) == 1 { f |= 0x0010; }
         if (cf ^ ((res >> top) & 1)) == 1 { f |= 0x0800; }
     } else if kind == 5 {  // SHR: OF is the pre-final value's top bit (= result bit top-1); AF = 0
         if ((res >> (top - 1)) & 1) == 1 { f |= 0x0800; }
@@ -280,6 +281,11 @@ fn str_step(op: i64) {
     } else if op == 0xAC || op == 0xAD {  // LODS
         if size16 { r[0] = seg_rd16(sbase, r[6] as i64); } else { set_r8(0, mem[(sbase + (r[6] as i64)) & 0xFFFFF]); }
         r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
+    } else if op == 0x6C || op == 0x6D {  // INS: the port value (open bus) goes to ES:DI
+        if size16 { seg_wr16(dbase, r[7] as i64, 0xFFFF); } else { wb8((dbase + (r[7] as i64)) & 0xFFFFF, 0xFF); }
+        r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
+    } else if op == 0x6E || op == 0x6F {  // OUTS: only the pointer moves (the port write is unobservable)
+        r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
     } else {  // SCAS (AE/AF)
         let b: i64 = if size16 { seg_rd16(dbase, r[7] as i64) as i64 } else { mem[(dbase + (r[7] as i64)) & 0xFFFFF] as i64 };
         let a: i64 = if size16 { r[0] as i64 } else { get_r8(0) as i64 };
@@ -293,16 +299,33 @@ fn exec_one() -> bool {
     seg_override = -1;
     rep_prefix = 0;
     var op = fetch8();
-    while op == 0x26 || op == 0x2E || op == 0x36 || op == 0x3E || op == 0xF0 || op == 0xF2 || op == 0xF3 {
+    while op == 0x26 || op == 0x2E || op == 0x36 || op == 0x3E || op == 0xF0 || op == 0xF2 || op == 0xF3 || (cpu_v20 && (op == 0x64 || op == 0x65)) {
         if op == 0xF0 { }
         else if op == 0xF2 { rep_prefix = 2; }
         else if op == 0xF3 { rep_prefix = 3; }
+        else if op == 0x64 { rep_prefix = 4; }
+        else if op == 0x65 { rep_prefix = 5; }
         else { seg_override = (op >> 3) & 3; }
         op = fetch8();
     }
     // 8086 decoder aliases: 60-6F execute as Jcc (70-7F); C0/C1/C8/C9 as C2/C3/CA/CB.
-    if op >= 0x60 && op <= 0x6F { op = op + 0x10; }
-    if op == 0xC0 || op == 0xC1 || op == 0xC8 || op == 0xC9 { op = op + 2; }
+    if !cpu_v20 {
+        if op >= 0x60 && op <= 0x6F { op = op + 0x10; }
+        if op == 0xC0 || op == 0xC1 || op == 0xC8 || op == 0xC9 { op = op + 2; }
+    }
+    if cpu_v20 && op >= 0x60 && op <= 0x6B {  // 80186 additions on the V20 (6C-6F are string ops, handled below)
+        if op == 0x60 { let sp0: i64 = r[4] as i64; push16(r[0] as i64); push16(r[1] as i64); push16(r[2] as i64); push16(r[3] as i64); push16(sp0); push16(r[5] as i64); push16(r[6] as i64); push16(r[7] as i64); return true; }  // PUSHA
+        if op == 0x61 { r[7] = pop16() as! u16; r[6] = pop16() as! u16; r[5] = pop16() as! u16; r[4] = r[4] + 2; r[3] = pop16() as! u16; r[2] = pop16() as! u16; r[1] = pop16() as! u16; r[0] = pop16() as! u16; return true; }  // POPA
+        if op == 0x62 { decode_modrm(); if !d_isreg { let lo: i64 = s16(seg_rd16(d_segbase, d_off) as i64); let hi: i64 = s16(seg_rd16(d_segbase, (d_off + 2) & 0xFFFF) as i64); let v: i64 = s16(r[d_reg] as i64); if v < lo || v > hi { do_int(5); } } return true; }  // BOUND
+        if op == 0x63 || op == 0x66 || op == 0x67 { decode_modrm(); return true; }  // undefined on the V20: decode and discard
+        if op == 0x68 { let v = fetch16(); push16(v as i64); return true; }  // PUSH imm16
+        if op == 0x6A { push16(s8(fetch8() as i64)); return true; }  // PUSH imm8 (sign-extended)
+        if op == 0x69 || op == 0x6B { decode_modrm(); let imm: i64 = if op == 0x69 { s16(fetch16() as i64) } else { s8(fetch8() as i64) }; let prod: i64 = s16(read_rm(true)) * imm; r[d_reg] = (prod & 0xFFFF) as! u16; let cfo: i64 = if prod != s16(prod & 0xFFFF) { 1 } else { 0 }; set_cf_of(cfo, cfo); return true; }  // IMUL reg, r/m, imm
+        return false;
+    }
+    if cpu_v20 && (op == 0xC0 || op == 0xC1) { decode_modrm(); let cnt: i64 = fetch8(); let size16: bool = (op & 1) == 1; let kind2: i64 = if d_reg == 6 { 4 } else { d_reg }; let v = read_rm(size16); let res = shift_op(kind2, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shift by imm8
+    if cpu_v20 && op == 0xC8 { let disp = fetch16(); let level: i64 = (fetch8() as i64) & 0x1F; push16(r[5] as i64); let frame: i64 = r[4] as i64; if level > 0 { var bp2: i64 = r[5] as i64; for i in 1..level { bp2 -= 2; push16(seg_rd16((seg[2] as i64) << 4, bp2 & 0xFFFF) as i64); } push16(frame); } r[5] = frame as! u16; r[4] = ((frame - 2 * level - (disp as i64)) & 0xFFFF) as! u16; return true; }  // ENTER (V20: SP drops by the display size on top of disp)
+    if cpu_v20 && op == 0xC9 { r[4] = r[5]; r[5] = pop16() as! u16; return true; }  // LEAVE
     if op == 0x88 { decode_modrm(); write_rm(false, get_r8(d_reg) as i64); return true; }
     if op == 0x89 { decode_modrm(); write_rm(true, r[d_reg] as i64); return true; }
     if op == 0x8A { decode_modrm(); set_r8(d_reg, read_rm(false) as! u8); return true; }
@@ -350,7 +373,7 @@ fn exec_one() -> bool {
     if op == 0x06 || op == 0x0E || op == 0x16 || op == 0x1E { push16(seg[(op >> 3) & 3] as i64); return true; }  // PUSH seg
     if op == 0x07 || op == 0x0F || op == 0x17 || op == 0x1F { let v = pop16(); seg[(op >> 3) & 3] = v as! u16; return true; }  // POP seg (0F = POP CS, 8086 only)
     if op == 0x8F { decode_modrm(); let v = pop16(); write_rm(true, v); return true; }  // POP Ev
-    if op >= 0xA4 && op <= 0xAF && op != 0xA8 && op != 0xA9 {  // string operations
+    if (op >= 0xA4 && op <= 0xAF && op != 0xA8 && op != 0xA9) || (cpu_v20 && op >= 0x6C && op <= 0x6F) {  // string operations
         let is_cmp: bool = op == 0xA6 || op == 0xA7 || op == 0xAE || op == 0xAF;
         if rep_prefix == 0 { str_step(op); }
         else {
@@ -361,6 +384,8 @@ fn exec_one() -> bool {
                     let zf: i64 = (flags >> 6) & 1;
                     if rep_prefix == 3 && zf == 0 { break; }
                     if rep_prefix == 2 && zf == 1 { break; }
+                    if rep_prefix == 4 && (flags & 1) == 1 { break; }
+                    if rep_prefix == 5 && (flags & 1) == 0 { break; }
                 }
             }
         }
@@ -380,10 +405,10 @@ fn exec_one() -> bool {
     if op == 0xA1 { let off = fetch16(); r[0] = seg_rd16(src_seg_base(3), off as i64); return true; }  // MOV AX,moffs16
     if op == 0xA2 { let off = fetch16(); wb8((src_seg_base(3) + (off as i64)) & 0xFFFFF, get_r8(0)); return true; }  // MOV moffs8,AL
     if op == 0xA3 { let off = fetch16(); seg_wr16(src_seg_base(3), off as i64, r[0]); return true; }  // MOV moffs16,AX
-    if op >= 0xD0 && op <= 0xD3 { decode_modrm(); if d_reg == 6 { if (op & 2) == 2 && get_r8(1) == 0 { return true; } let sm: bool = (op & 1) == 1; write_rm(sm, if sm { 0xFFFF } else { 0xFF }); flags = (((flags as i64) & 0xF72A) | 0x0084) as! u16; return true; } let size16: bool = (op & 1) == 1; let cnt: i64 = if (op & 2) == 0 { 1 } else { get_r8(1) as i64 }; let v = read_rm(size16); let res = shift_op(d_reg, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shifts/rotates; /6 = SETMO
+    if op >= 0xD0 && op <= 0xD3 { decode_modrm(); if d_reg == 6 && !cpu_v20 { if (op & 2) == 2 && get_r8(1) == 0 { return true; } let sm: bool = (op & 1) == 1; write_rm(sm, if sm { 0xFFFF } else { 0xFF }); flags = (((flags as i64) & 0xF72A) | 0x0084) as! u16; return true; } let size16: bool = (op & 1) == 1; let cnt: i64 = if (op & 2) == 0 { 1 } else { get_r8(1) as i64 }; let v = read_rm(size16); let res = shift_op(if d_reg == 6 { 4 } else { d_reg }, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shifts/rotates; /6 = SETMO (8086) or SAL (V20)
     if op == 0xD4 { let base: i64 = fetch8(); if base == 0 { do_int(0); } else { let al: i64 = get_r8(0); let q: i64 = al / base; set_r8(4, q as! u8); set_r8(0, (al - q * base) as! u8); set_szp(al - q * base, 8); flags = flags & 0xF7EE; } return true; }  // AAM
-    if op == 0xD5 { let base: i64 = fetch8(); let lo: i64 = ((get_r8(4) as i64) * base) & 0xFF; let v = alu_op(0, lo, get_r8(0) as i64, 8); set_r8(0, v as! u8); set_r8(4, 0); return true; }  // AAD
-    if op == 0xD6 { set_r8(0, if (flags & 1) != 0 { 0xFF } else { 0 }); return true; }  // SALC
+    if op == 0xD5 { let base: i64 = fetch8(); let ub: i64 = if cpu_v20 { 10 } else { base }; let lo: i64 = ((get_r8(4) as i64) * ub) & 0xFF; let v = alu_op(0, lo, get_r8(0) as i64, 8); set_r8(0, v as! u8); set_r8(4, 0); return true; }  // AAD
+    if op == 0xD6 { if cpu_v20 { let off: i64 = ((r[3] as i64) + (get_r8(0) as i64)) & 0xFFFF; set_r8(0, mem[(src_seg_base(3) + off) & 0xFFFFF]); } else { set_r8(0, if (flags & 1) != 0 { 0xFF } else { 0 }); } return true; }  // SALC (8086) / XLAT (V20)
     if op == 0xD7 { let off: i64 = ((r[3] as i64) + (get_r8(0) as i64)) & 0xFFFF; set_r8(0, mem[(src_seg_base(3) + off) & 0xFFFFF]); return true; }  // XLAT
     if op >= 0xD8 && op <= 0xDF { decode_modrm(); return true; }  // ESC: no coprocessor, no architectural effect
     if op == 0xE4 { fetch8(); set_r8(0, 0xFF); return true; }  // IN AL,imm8 (open bus reads as FF)
@@ -578,6 +603,8 @@ fn run_file(path: u8[:]) {
 
 fn main() {
     let argv = args();
-    if argv.len < 2 { print("usage: sst <case-file.json> [more files...]"); exit(1); }
-    for i in 1..argv.len { run_file(argv[i]); }
+    if argv.len < 2 { print("usage: sst [v20] <case-file.json> [more files...]"); exit(1); }
+    var start: i64 = 1;
+    if argv[1] == "v20" { cpu_v20 = true; start = 2; }
+    for i in start..argv.len { run_file(argv[i]); }
 }

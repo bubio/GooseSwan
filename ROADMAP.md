@@ -15,7 +15,10 @@ and the next step recorded in the session notes.
 - All documented 8086 instructions pass the SingleStepTests 8086 corpus.
   Status 2026-11-07: 634,406 / 646,000 cases (98.21%); the only failures are
   documented-undefined flag residue after DIV/IDIV/IMUL and AAM base 0.
-- V20/V30 corpora for the NEC differences. ← next
+- V20/V30 corpora for the NEC differences.
+  Status 2026-11-07: V20 base set 2,807,996 / 2,899,000 (96.86%) under a
+  `v20` CPU profile; only multiply/divide flag residue remains non-green.
+  The 0F-prefixed native extensions are the last V20 files to implement.
 - Done when: WSCpuTest agrees (V30MZ-specific behaviour flushed out).
 
 ## M2 — Bus and cartridge
