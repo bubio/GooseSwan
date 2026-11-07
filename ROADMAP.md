@@ -55,7 +55,11 @@ and the next step recorded in the session notes.
   colour palettes, 2bpp/4bpp tiles, rendered per completed scanline
   into an RGB444 framebuffer, with a `ppu_test` synthetic suite
   (24/24), an `fb` dump/hash harness arg, and the WSHWTest Test All
-  and Test Windows screens rendering correctly. Sprites are next.
+  and Test Windows screens rendering correctly. Sprites have since
+  landed too (attribute table, SCR2 priority, sprite window,
+  32-per-line limit; `ppu_test` 39/39), and `tests/fb_check.sh`
+  guards three golden screen hashes. Remaining PPU gaps: LCD
+  icons/off state and per-frame sprite latching.
 
 ## M4 — Peripherals (in progress)
 - APU, timers, interrupts, DMA.

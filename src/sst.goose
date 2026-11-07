@@ -264,15 +264,70 @@ fn ppu_scr2_visible(x: i64, y: i64) -> bool {
     return inside;
 }
 
+// Sprite line buffers: the first opaque sprite pixel per column (any
+// priority) and the first opaque priority-1 (in front of SCR2) pixel.
+var spr_any_c: i64[224] = [0; 224];
+var spr_any_on: bool[224] = [false; 224];
+var spr_front_c: i64[224] = [0; 224];
+var spr_front_on: bool[224] = [false; 224];
+
+// Fill the sprite line buffers for line y from the live attribute table
+// (Swanium latches the table per frame; sampling it per line is the
+// documented simplification here). At most 32 sprites per line count,
+// in table order starting at SPR_FIRST; X wraps at 256.
+fn ppu_sprite_line(y: i64) {
+    for i in 224 { spr_any_on[i] = false; spr_front_on[i] = false; }
+    let base: i64 = ((io_ports[0x04] as i64) & 0x3F) << 9;
+    let first: i64 = io_ports[0x05] as i64;
+    var count: i64 = io_ports[0x06] as i64; if count > 128 { count = 128; }
+    let dc: i64 = io_ports[0x00] as i64;
+    var used: i64 = 0;
+    var n: i64 = 0;
+    while n < count && used < 32 {
+        let idx: i64 = (first + n) & 127; n += 1;
+        let ea: i64 = base + idx * 4;
+        let w: i64 = (mem[ea] as i64) | ((mem[ea + 1] as i64) << 8);
+        let sy: i64 = mem[ea + 2] as i64;
+        let sx: i64 = mem[ea + 3] as i64;
+        var dy: i64 = y - sy; if dy < 0 { dy += 256; }
+        if dy >= 8 { continue; }
+        used += 1;
+        var ty: i64 = dy; if (w & 0x8000) != 0 { ty = 7 - ty; }
+        let tile: i64 = w & 0x1FF;
+        let pal: i64 = ((w >> 9) & 7) + 8;
+        let prio: bool = (w & 0x2000) != 0;
+        let wattr: bool = (w & 0x1000) != 0;
+        for dx in 8 {
+            var x: i64 = sx + dx; if x >= 256 { x -= 256; }
+            if x >= 224 { continue; }
+            if spr_any_on[x] && (!prio || spr_front_on[x]) { continue; }
+            if (dc & 8) != 0 && wattr && x >= (io_ports[0x0C] as i64) && x <= (io_ports[0x0E] as i64) && y >= (io_ports[0x0D] as i64) && y <= (io_ports[0x0F] as i64) { continue; }
+            var tx: i64 = dx; if (w & 0x4000) != 0 { tx = 7 - tx; }
+            let px: i64 = ppu_tile_pixel(tile, tx, ty);
+            if ppu_transparent(pal, px) { continue; }
+            let c: i64 = ppu_resolve(pal, px);
+            if !spr_any_on[x] { spr_any_on[x] = true; spr_any_c[x] = c; }
+            if prio && !spr_front_on[x] { spr_front_on[x] = true; spr_front_c[x] = c; }
+        }
+    }
+}
+
 fn render_line(y: i64) {
     if y < 0 || y >= 144 { return; }
     let dc: i64 = io_ports[0x00] as i64;
     let bd: i64 = ppu_backdrop();
     let row: i64 = y * 224;
+    if (dc & 4) != 0 { ppu_sprite_line(y); }
     for x in 224 {
         var c: i64 = bd;
         if (dc & 1) != 0 { let px, pal = ppu_bg_sample(0, x, y); if !ppu_transparent(pal, px) { c = ppu_resolve(pal, px); } }
-        if (dc & 2) != 0 && ppu_scr2_visible(x, y) { let px2, pal2 = ppu_bg_sample(1, x, y); if !ppu_transparent(pal2, px2) { c = ppu_resolve(pal2, px2); } }
+        var s2_on: bool = false;
+        var s2_c: i64 = 0;
+        if (dc & 2) != 0 && ppu_scr2_visible(x, y) { let px2, pal2 = ppu_bg_sample(1, x, y); if !ppu_transparent(pal2, px2) { s2_on = true; s2_c = ppu_resolve(pal2, px2); } }
+        if (dc & 4) != 0 {
+            if s2_on { if spr_front_on[x] { c = spr_front_c[x]; } else { c = s2_c; } }
+            else if spr_any_on[x] { c = spr_any_c[x]; }
+        } else if s2_on { c = s2_c; }
         fb[row + x] = c as! u16;
     }
 }
@@ -1372,6 +1427,15 @@ fn ppu_clear() {
 
 fn ppu_set16(addr: i64, w: i64) { mem[addr] = (w & 0xFF) as! u8; mem[addr + 1] = ((w >> 8) & 0xFF) as! u8; }
 
+fn ppu_set_sprite(ea: i64, w: i64, yy: i64, xx: i64) { ppu_set16(ea, w); mem[ea + 2] = yy as! u8; mem[ea + 3] = xx as! u8; }
+
+fn ppu_setup_sprite_common() {
+    io_ports[0x30] = 0x10; io_ports[0x31] = 0x32;
+    io_ports[0x38] = 0x02; io_ports[0x39] = 0x13;
+    mem[0x2000 + 32] = 0xFF; mem[0x2000 + 33] = 0x00;
+    for i in 6 { ppu_set16(i * 2, 2); }
+}
+
 fn ppu_setup_mono() {
     io_ports[0x1C] = 0x0F;
     io_ports[0x1D] = 0x37;
@@ -1449,6 +1513,79 @@ fn ppu_test() {
     ppu_check("s3 4bpp x1", fb[1] as i64, 0x222);
     ppu_check("s3 4bpp x6", fb[6] as i64, 0x777);
     ppu_check("s3 4bpp x7", fb[7] as i64, 0x888);
+    // Scene 4: sprites
+    ppu_clear();
+    ppu_setup_mono();
+    ppu_setup_sprite_common();
+    io_ports[0x07] = 0;
+    io_ports[0x04] = 4;
+    io_ports[0x05] = 0;
+    io_ports[0x06] = 2;
+    io_ports[0x00] = 1 | 4;
+    ppu_set_sprite(0x800, 1, 0, 16);
+    ppu_set_sprite(0x804, 1 | (4 << 9), 0, 20);
+    render_line(0);
+    ppu_check("s4 bg x0", fb[0] as i64, 0xFFF);
+    ppu_check("s4 spr0 x16 pix3", fb[16] as i64, 0xCCC);
+    ppu_check("s4 spr0 x17 pix2", fb[17] as i64, 0x888);
+    ppu_check("s4 spr0 x19 pix0 pal8 opaque", fb[19] as i64, 0x000);
+    ppu_check("s4 spr0 wins x20", fb[20] as i64, 0xCCC);
+    ppu_check("s4 spr1 x25 pix2 pal12", fb[25] as i64, 0xCCC);
+    ppu_check("s4 spr1 x27 pix0 transparent", fb[27] as i64, 0xFFF);
+    // Priority vs SCR2 (sprites move to 0xC00; SCR2 takes base 0x800)
+    io_ports[0x07] = 0x10;
+    io_ports[0x04] = 6;
+    io_ports[0x06] = 3;
+    io_ports[0x00] = 1 | 2 | 4;
+    mem[0x2000 + 48] = 0x00; mem[0x2000 + 49] = 0xFF;
+    ppu_set16(0x800, 3);
+    ppu_set16(0x802, 4 << 9);
+    ppu_set_sprite(0xC00, 1, 0, 0);
+    ppu_set_sprite(0xC04, 1 | (1 << 13), 0, 16);
+    ppu_set_sprite(0xC08, 1, 0, 8);
+    render_line(0);
+    ppu_check("s4 prio0 behind scr2 x0", fb[0] as i64, 0x888);
+    ppu_check("s4 prio0 through transparent scr2 x8", fb[8] as i64, 0xCCC);
+    ppu_check("s4 prio1 front of scr2 x16", fb[16] as i64, 0xCCC);
+    // Sprite window: sprite D (prio 1, window attr) at x32, window x 0..35
+    ppu_set_sprite(0xC0C, 1 | (1 << 13) | (1 << 12), 0, 32);
+    io_ports[0x06] = 4;
+    io_ports[0x00] = 1 | 2 | 4 | 8;
+    io_ports[0x0C] = 0; io_ports[0x0D] = 0; io_ports[0x0E] = 35; io_ports[0x0F] = 0;
+    render_line(0);
+    ppu_check("s4 sprwin hidden x32", fb[32] as i64, 0x000);
+    ppu_check("s4 sprwin shown x36", fb[36] as i64, 0xCCC);
+    // 32-per-line limit: 32 transparent sprites consume the line's slots
+    ppu_clear();
+    ppu_setup_mono();
+    ppu_setup_sprite_common();
+    io_ports[0x07] = 0;
+    io_ports[0x04] = 4;
+    io_ports[0x05] = 0;
+    io_ports[0x00] = 1 | 4;
+    for i in 33 {
+        if i < 32 { ppu_set_sprite(0x800 + i * 4, 4 << 9, 0, i * 8); }
+        else { ppu_set_sprite(0x800 + i * 4, 1, 0, 16); }
+    }
+    io_ports[0x06] = 33;
+    render_line(0);
+    ppu_check("s4 limit 33rd ignored x16", fb[16] as i64, 0xFFF);
+    ppu_set_sprite(0x800 + 5 * 4, 1, 0, 16);
+    ppu_set_sprite(0x800 + 32 * 4, 4 << 9, 0, 128);
+    render_line(0);
+    ppu_check("s4 limit slot5 visible x16", fb[16] as i64, 0xCCC);
+    // Y wrap: sprite at Y=254 covers line 1 at tile row 3 (all pixel 0)
+    ppu_clear();
+    ppu_setup_mono();
+    ppu_setup_sprite_common();
+    io_ports[0x07] = 0;
+    io_ports[0x04] = 4;
+    io_ports[0x05] = 0;
+    io_ports[0x06] = 1;
+    io_ports[0x00] = 1 | 4;
+    ppu_set_sprite(0x800, 1, 254, 48);
+    render_line(1);
+    ppu_check("s4 ywrap line1 x48", fb[224 + 48] as i64, 0x000);
     print("ppu_test: ", ppu_pass, " passed, ", ppu_fail, " failed");
 }
 
