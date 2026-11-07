@@ -86,5 +86,9 @@ and the next step recorded in the session notes.
 - Done when: a distributable build plays games end to end.
 - Status 2026-11-08: the audio sample stream has landed
   (24 kHz stereo, Swanium's output model, `sst apu_test` 83/83,
-  `ws <rom> <suite> wav` writes audio.wav). Remaining: the SDL3
-  window + input, save-data persistence, a real game end to end.
+  `ws <rom> <suite> wav` writes audio.wav). The frontend has
+  landed too: `goose build src/gooseswan.goose` gives a windowed
+  build (gfx texture path pixel-verified headlessly through
+  lavapipe, keyboard input, chunked-mixer audio out, save files
+  next to the ROM). Remaining: a real game end to end on real
+  hardware, plus polish (gamepad, scaling options).

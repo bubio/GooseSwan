@@ -175,6 +175,11 @@ fn rb16(p: i64) -> u16 { (rd8(p) as u16) | ((rd8((p + 1) & 0xFFFFF) as u16) << 8
 // boundary (offset 0xFFFF is followed by offset 0x0000), as on real hardware.
 fn seg_rd16(base: i64, off: i64) -> u16 { (rd8((base + off) & 0xFFFFF) as u16) | ((rd8((base + ((off + 1) & 0xFFFF)) & 0xFFFFF) as u16) << 8) }
 fn seg_wr16(base: i64, off: i64, v: u16) { wb8((base + off) & 0xFFFFF, v as! u8); wb8((base + ((off + 1) & 0xFFFF)) & 0xFFFFF, (v >> 8) as! u8); }
+// Memory writes the SST harness made, so a case can restore RAM
+// afterwards; recording is on only while a corpus case executes.
+var touched: i64[>..<] = [];
+var recording: bool = false;
+
 fn wb8(p: i64, v: u8) {
     if ws_mode {
         if p < 0x10000 { mem[p] = v; }

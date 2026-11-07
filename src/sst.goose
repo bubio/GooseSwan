@@ -16,8 +16,6 @@ import ppu;
 import apu;
 
 // ---- CPU state ----
-var touched: i64[>..<] = [];
-var recording: bool = false;
 
 var c_init_regs: i64[14] = [0; 14];
 var c_init_present: bool[14] = [false; 14];

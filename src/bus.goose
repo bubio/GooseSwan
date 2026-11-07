@@ -474,14 +474,21 @@ fn count_ok(buf: u8[:], n: i64) -> i64 {
 // Hand-built scenes with hand-computed expected pixels: mono palettes and
 // transparency, scroll, hflip, SCR2 windowing, colour palette RAM, the
 // tile-bank bit and 4bpp packed tiles.
-fn run_ws(path: u8[:]) {
+// ---- Machine boot + one frame, shared by the headless runner and
+// the frontend. ws_boot expects the ROM in `rom` and a fresh
+// process state; ws_frame runs exactly one 40,704-cycle frame with
+// the current keys_state, delivering interrupts and the TF trap
+// between instructions exactly as the runner always has.
+var ws_prev_keys: i64 = 0;
+var ws_total: i64 = 0;
+var ws_unsupported: bool = false;
+
+fn ws_boot() {
     ws_mode = true;
     cpu_v20 = true;
     cpu_mz = true;
-    guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
     if rom.len > 16 { ws_mono_cart = (rom[rom.len - 9] as i64) == 0; }
     if rom.len > 16 { ee_init_cart(rom[rom.len - 5] as i64); }
-    print("rom loaded: ", rom.len, " bytes");
     for i in 1048576 { mem[i] = 0; }
     for i in 256 { io_ports[i] = 0; }
     bk_ram = 0xFF; bk_rom0 = 0xFF; bk_rom1 = 0xFF; bk_linear = 0;
@@ -490,11 +497,67 @@ fn run_ws(path: u8[:]) {
     for i in 8 { r[i] = 0; }
     for i in 4 { seg[i] = 0; }
     seg[1] = 0xFFFF; ip = 0; flags = 0;
+    ws_prev_keys = 0; ws_total = 0; ws_unsupported = false;
+    sweep_prepaid = 0; sdma_running = false; sdma_clock = 0;
+    aud_acc = 0; aud_buf = [];
+}
+
+fn ws_frame() {
+    if keys_state != 0 && ws_prev_keys == 0 { int_cause |= 0x02 & (io_ports[0xB2] as i64); }  // KEY_PRESS cause latches on the press edge, only when enabled
+    ws_prev_keys = keys_state;
+    var spent: i64 = 0;
+    while spent < 40704 {
+        if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
+        if (flags & 0x0100) != 0 && dbg_op != 0x9D && dbg_op != 0xCF { do_int(1); ws_cycles += 33; spent += 33; }  // TF single-step trap (entry charge fitted from WSTimingTest's trap case)
+        if !cpu_halted {
+            let pre_cx: i64 = r[1] as i64;
+            fault_chg = 0; cyc_in_exec = true;
+            let okc: bool = exec_one(); cyc_in_exec = false;
+            if !okc { ws_unsupported = true; return; }
+            ws_total += 1;
+            let c: i64 = est_cycles(pre_cx);
+            ws_cycles += c; spent += c;
+        } else { ws_cycles += 32; spent += 32; }
+        ws_line_events();
+    }
+}
+
+// ---- Save-data persistence (used by the frontend): the cartridge
+// SRAM next to the ROM as <rom>.sav, the cartridge EEPROM as
+// <rom>.eep, and the console's internal EEPROM as <rom>.iep.
+fn ws_save_file_name(path: u8[:], ext: const u8[:]) -> u8[>..] {
+    var name: u8[>..] = [];
+    for i in path.len { name.push(path[i]); }
+    for i in ext.len { name.push(ext[i]); }
+    return name;
+}
+
+fn ws_load_saves(path: u8[:]) {
+    var buf: u8[>..] = [];
+    if read_file(ws_save_file_name(path, ".sav"), buf) { var n: i64 = buf.len; if n > 65536 { n = 65536; } for i in n { sram[i] = buf[i]; } }
+    if cart_eeprom { var eb: u8[>..] = []; if read_file(ws_save_file_name(path, ".eep"), eb) { var n: i64 = eb.len; if n > ee_size[0] { n = ee_size[0]; } for i in n { ee_data[i] = eb[i]; } } }
+    var ib: u8[>..] = [];
+    if read_file(ws_save_file_name(path, ".iep"), ib) { var n: i64 = ib.len; if n > 2048 { n = 2048; } for i in n { ee_data[2048 + i] = ib[i]; } }
+}
+
+fn ws_save_saves(path: u8[:]) {
+    var sb: u8[>..] = [];
+    for i in 65536 { sb.push(sram[i]); }
+    write_file(ws_save_file_name(path, ".sav"), sb);
+    if cart_eeprom { var eb: u8[>..] = []; for i in ee_size[0] { eb.push(ee_data[i]); } write_file(ws_save_file_name(path, ".eep"), eb); }
+    var ib: u8[>..] = [];
+    for i in 2048 { ib.push(ee_data[2048 + i]); }
+    write_file(ws_save_file_name(path, ".iep"), ib);
+}
+
+fn run_ws(path: u8[:]) {
+    guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
+    ws_boot();
+    print("rom loaded: ", rom.len, " bytes");
     var screen: u8[1024] = [0; 1024];
     var last: u8[1024] = [0; 1024];
     var lastn: i64 = 0;
     var frozen: i64 = 0;
-    var total: i64 = 0;
     var menu_idx: i64 = 0;
     let argv2 = args();
     var survey: bool = false;
@@ -516,7 +579,6 @@ fn run_ws(path: u8[:]) {
     var skip_hold: i64 = 0;
     var frame: i64 = 0;
     var done: bool = false;
-    var prev_keys: i64 = 0;
     var dismiss: i64 = 0;
     var page_done: i64 = 0;
     var page_hold: i64 = 0;
@@ -538,35 +600,20 @@ fn run_ws(path: u8[:]) {
         } else if frame >= 30 && frame < 45 { keys_state = 1 << 10; }  // hold A to pick "Test All"
         if dismiss > 0 { keys_state |= 1 << 10; dismiss -= 1; }  // auto-tap A to dismiss "press any key" HLT waits
         if page_hold > 0 { keys_state |= 1 << 5; page_hold -= 1; }  // WSTimingTest: X2 (right) advances the page
-        if keys_state != 0 && prev_keys == 0 { int_cause |= 0x02 & (io_ports[0xB2] as i64); }  // KEY_PRESS cause latches on the press edge, only when enabled
-        prev_keys = keys_state;
-        var spent: i64 = 0;
-        while spent < 40704 {
-            if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
-            if (flags & 0x0100) != 0 && dbg_op != 0x9D && dbg_op != 0xCF { do_int(1); ws_cycles += 33; spent += 33; }  // TF single-step trap (entry charge fitted from WSTimingTest's trap case)
-            if !cpu_halted {
-                let pre_cx: i64 = r[1] as i64;
-                fault_chg = 0; cyc_in_exec = true;
-                let okc: bool = exec_one(); cyc_in_exec = false;
-                if !okc { print("unsupported opcode ", dbg_op, " at cs:ip ", seg[1], ":", dbg_ip, " frame ", frame); let m = ws_screen_text(screen); write_stdout(screen[..m]); exit(1); }
-                total += 1;
-                let c: i64 = est_cycles(pre_cx);
-                ws_cycles += c; spent += c;
-            } else { ws_cycles += 32; spent += 32; }
-            ws_line_events();
-        }
+        ws_frame();
+        if ws_unsupported { print("unsupported opcode ", dbg_op, " at cs:ip ", seg[1], ":", dbg_ip, " frame ", frame); let m = ws_screen_text(screen); write_stdout(screen[..m]); exit(1); }
         let n = ws_screen_text(screen);
         var same: bool = n == lastn;
         if same { for i in n { if screen[i] != last[i] { same = false; } } }
         if same { frozen += 1; } else { frozen = 0; for i in n { last[i] = screen[i]; } lastn = n; }
         if frozen == 200 && cpu_halted { dismiss = 6; }
         if page_target > 0 && frame > 60 && frozen == 90 && page_done < page_target { page_done += 1; page_hold = 4; frozen = 0; for i in n { last[i] = 0; } lastn = 0; }
-        if survey && frozen >= 90 && skips < 40 { skips += 1; print("survey skip ", skips, " at frame ", frame, " after ", total, " instructions; screen was:"); write_stdout(screen[..n]); skip_hold = 6; frozen = 0; for i in n { last[i] = 0; } lastn = 0; }
-        else if frozen >= 600 { print("screen frozen for 600 frames at frame ", frame, " after ", total, " instructions (waiting for a key: end of Test All or a failure stop)"); done = true; }
+        if survey && frozen >= 90 && skips < 40 { skips += 1; print("survey skip ", skips, " at frame ", frame, " after ", ws_total, " instructions; screen was:"); write_stdout(screen[..n]); skip_hold = 6; frozen = 0; for i in n { last[i] = 0; } lastn = 0; }
+        else if frozen >= 600 { print("screen frozen for 600 frames at frame ", frame, " after ", ws_total, " instructions (waiting for a key: end of Test All or a failure stop)"); done = true; }
         else if frame % 2000 == 0 { print("frame ", frame, " oks=", count_ok(screen, n)); write_stdout(screen[..n]); }
         frame += 1;
     }
-    print("final screen (frame ", frame, ", ", total, " instructions):");
+    print("final screen (frame ", frame, ", ", ws_total, " instructions):");
     print("state: cs:ip=", seg[1], ":", ip, " ax=", r[0], " bx=", r[2], " cx=", r[1], " dx=", r[3], " sp=", r[4], " bp=", r[5], " si=", r[6], " di=", r[7], " flags=", flags, " halted=", cpu_halted, " line=", (ws_cycles % 40704) / 256, " cause=", int_cause, " enable=", io_ports[0xB2], " scr_area=", io_ports[0x07], " p60=", io_ports[0x60], " p01raw=", io_ports[0x01], " p01rd=", port_rd(1));
     let m = ws_screen_text(screen);
     write_stdout(screen[..m]);
