@@ -2,7 +2,7 @@
 .goose/
 *.o
 /gooseswan
-/sst
+/src/sst
 
 # Test data (large corpora and ROMs are fetched, not committed)
 tests/data/

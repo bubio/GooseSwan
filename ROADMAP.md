@@ -4,11 +4,12 @@ Each milestone's completion condition is a set of passing tests.
 Work proceeds in slices: one slice per session, ending with the pass counts
 and the next step recorded in the session notes.
 
-## M0 — Scaffolding
+## M0 — Scaffolding ✅ (2026-11-07)
 - SingleStepTests harness in Goose: load a JSON case file, set initial
   registers/memory, execute one instruction, compare final state.
 - V30MZ core skeleton passing a handful of opcodes (MOV / basic ALU).
 - Done when: the harness runs a real 8086 case file and reports pass/fail counts.
+- Result: 28,000 cases passing (MOV + ADD slice). See docs/sessions/2026-11-07-m0.md.
 
 ## M1 — CPU complete
 - All documented 8086 instructions pass the SingleStepTests 8086 corpus.
