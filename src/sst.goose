@@ -86,18 +86,39 @@ fn parity_even(v: i64) -> bool {
     for i in 8 { p += x & 1; x = x >> 1; }
     p % 2 == 0
 }
-fn add_flags(a: i64, b: i64, res: i64, bits: i64) {
+fn alu_op(kind: i64, a: i64, b: i64, bits: i64) -> i64 {
+    // kind: 0 ADD, 1 OR, 2 ADC, 3 SBB, 4 AND, 5 SUB, 6 XOR, 7 CMP
+    // a and b are unsigned values already masked to the operand width.
     let mask: i64 = if bits == 16 { 0xFFFF } else { 0xFF };
     let sign: i64 = if bits == 16 { 0x8000 } else { 0x80 };
-    let rr: i64 = res & mask;
+    let cf_in: i64 = if (flags & 1) != 0 { 1 } else { 0 };
+    var res: i64 = 0; var cf_out: i64 = 0; var af: i64 = 0; var of: i64 = 0;
+    if kind == 0 || kind == 2 {  // ADD / ADC
+        let c: i64 = if kind == 2 { cf_in } else { 0 };
+        let full: i64 = a + b + c;
+        res = full & mask;
+        cf_out = if full > mask { 1 } else { 0 };
+        af = if ((a & 0xF) + (b & 0xF) + c) > 0xF { 1 } else { 0 };
+        of = if ((a ^ res) & (b ^ res) & sign) != 0 { 1 } else { 0 };
+    } else if kind == 5 || kind == 3 || kind == 7 {  // SUB / SBB / CMP
+        let c: i64 = if kind == 3 { cf_in } else { 0 };
+        res = (a - b - c) & mask;
+        cf_out = if a < b + c { 1 } else { 0 };
+        af = if (a & 0xF) < (b & 0xF) + c { 1 } else { 0 };
+        of = if ((a ^ b) & (a ^ res) & sign) != 0 { 1 } else { 0 };
+    } else {  // OR / AND / XOR (and TEST via AND)
+        if kind == 1 { res = a | b; } else if kind == 4 { res = a & b; } else { res = a ^ b; }
+        res = res & mask;
+    }
     var f: i64 = (flags as i64) & 0xF72A;  // keep non-arithmetic bits
-    if res > mask { f |= 0x0001; }                       // CF
-    if parity_even(rr & 0xFF) { f |= 0x0004; }           // PF
-    if ((a & 0xF) + (b & 0xF)) > 0xF { f |= 0x0010; }    // AF
-    if rr == 0 { f |= 0x0040; }                          // ZF
-    if (rr & sign) != 0 { f |= 0x0080; }                 // SF
-    if ((a ^ rr) & (b ^ rr) & sign) != 0 { f |= 0x0800; }  // OF
+    if cf_out == 1 { f |= 0x0001; }
+    if parity_even(res & 0xFF) { f |= 0x0004; }
+    if af == 1 { f |= 0x0010; }
+    if res == 0 { f |= 0x0040; }
+    if (res & sign) != 0 { f |= 0x0080; }
+    if of == 1 { f |= 0x0800; }
     flags = f as! u16;
+    return res;
 }
 
 // ---- Instruction slice: MOV + ADD ----
@@ -116,12 +137,23 @@ fn exec_one() -> bool {
     if op == 0xC7 { decode_modrm(); let v = fetch16(); write_rm(true, v as i64); return true; }
     if op >= 0xB0 && op <= 0xB7 { let v = fetch8(); set_r8(op - 0xB0, v); return true; }
     if op >= 0xB8 && op <= 0xBF { r[op - 0xB8] = fetch16(); return true; }
-    if op == 0x00 { decode_modrm(); let dst = read_rm(false); let src: i64 = get_r8(d_reg); let res = dst + src; write_rm(false, res); add_flags(dst, src, res, 8); return true; }
-    if op == 0x01 { decode_modrm(); let dst = read_rm(true); let src: i64 = r[d_reg]; let res = dst + src; write_rm(true, res); add_flags(dst, src, res, 16); return true; }
-    if op == 0x02 { decode_modrm(); let src = read_rm(false); let dst: i64 = get_r8(d_reg); let res = dst + src; set_r8(d_reg, res as! u8); add_flags(dst, src, res, 8); return true; }
-    if op == 0x03 { decode_modrm(); let src = read_rm(true); let dst: i64 = r[d_reg]; let res = dst + src; r[d_reg] = res as! u16; add_flags(dst, src, res, 16); return true; }
-    if op == 0x04 { let dst: i64 = get_r8(0); let src: i64 = fetch8(); let res = dst + src; set_r8(0, res as! u8); add_flags(dst, src, res, 8); return true; }
-    if op == 0x05 { let dst: i64 = r[0]; let src: i64 = fetch16(); let res = dst + src; r[0] = res as! u16; add_flags(dst, src, res, 16); return true; }
+    if op <= 0x3D && (op & 7) <= 5 {  // ALU family: opcodes 00-3D, forms 0-5
+        let kind: i64 = (op >> 3) & 7;
+        let form: i64 = op & 7;
+        if form == 0 { decode_modrm(); let dst = read_rm(false); let srcv: i64 = get_r8(d_reg); let res = alu_op(kind, dst, srcv, 8); if kind != 7 { write_rm(false, res); } return true; }
+        if form == 1 { decode_modrm(); let dst = read_rm(true); let srcv: i64 = r[d_reg]; let res = alu_op(kind, dst, srcv, 16); if kind != 7 { write_rm(true, res); } return true; }
+        if form == 2 { decode_modrm(); let srcv = read_rm(false); let dst: i64 = get_r8(d_reg); let res = alu_op(kind, dst, srcv, 8); if kind != 7 { set_r8(d_reg, res as! u8); } return true; }
+        if form == 3 { decode_modrm(); let srcv = read_rm(true); let dst: i64 = r[d_reg]; let res = alu_op(kind, dst, srcv, 16); if kind != 7 { r[d_reg] = res as! u16; } return true; }
+        if form == 4 { let srcv: i64 = fetch8(); let dst: i64 = get_r8(0); let res = alu_op(kind, dst, srcv, 8); if kind != 7 { set_r8(0, res as! u8); } return true; }
+        let srcv: i64 = fetch16(); let dst: i64 = r[0]; let res = alu_op(kind, dst, srcv, 16); if kind != 7 { r[0] = res as! u16; } return true;
+    }
+    if op == 0x84 { decode_modrm(); let dst = read_rm(false); let srcv: i64 = get_r8(d_reg); alu_op(4, dst, srcv, 8); return true; }  // TEST Eb,Gb
+    if op == 0x85 { decode_modrm(); let dst = read_rm(true); let srcv: i64 = r[d_reg]; alu_op(4, dst, srcv, 16); return true; }  // TEST Ev,Gv
+    if op == 0xA8 { let srcv: i64 = fetch8(); let dst: i64 = get_r8(0); alu_op(4, dst, srcv, 8); return true; }  // TEST AL,imm8
+    if op == 0xA9 { let srcv: i64 = fetch16(); let dst: i64 = r[0]; alu_op(4, dst, srcv, 16); return true; }  // TEST AX,imm16
+    if op == 0x80 { decode_modrm(); let dst = read_rm(false); let srcv: i64 = fetch8(); let res = alu_op(d_reg, dst, srcv, 8); if d_reg != 7 { write_rm(false, res); } return true; }
+    if op == 0x81 { decode_modrm(); let dst = read_rm(true); let srcv: i64 = fetch16(); let res = alu_op(d_reg, dst, srcv, 16); if d_reg != 7 { write_rm(true, res); } return true; }
+    if op == 0x83 { decode_modrm(); let dst = read_rm(true); let b8 = fetch8(); let b8i: i64 = b8; let srcv: i64 = (if b8i > 127 { b8i - 256 } else { b8i }) & 0xFFFF; let res = alu_op(d_reg, dst, srcv, 16); if d_reg != 7 { write_rm(true, res); } return true; }
     return false;
 }
 
