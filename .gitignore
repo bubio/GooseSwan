@@ -3,6 +3,7 @@
 *.o
 /gooseswan
 /src/sst
+/src/gooseswan
 
 # Test data (large corpora and ROMs are fetched, not committed)
 tests/data/

@@ -43,7 +43,7 @@ jobs:
             platform="${rest%-*}"
             arch="${rest##*-}"
             chmod +x "$dir/gooseswan"
-            ./scripts/package_zip.sh "$dir/gooseswan" "$platform" "$arch"
+            sh ./scripts/package_zip.sh "$dir/gooseswan" "$platform" "$arch"
           done
 
           shopt -s nullglob
