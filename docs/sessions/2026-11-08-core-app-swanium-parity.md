@@ -58,8 +58,21 @@ other than std/core modules and any file/stdout/process call.
 
 ## Results
 
-Battery unchanged and green (8086 634,406/646,000; WSHWTest Test All; fb 3/3;
-WSTimingTest 400/407). ws-test-suite 22/22. Library sweep: see the follow-up below.
+Battery green (8086 634,406/646,000; WSHWTest Test All; fb 3/3; WSTimingTest
+400/407). ws-test-suite 16 → 22/22.
+
+Library sweep (311 commercial ROMs, final framebuffer vs Swanium):
+
+| | identical | <1k px | <10k px | ≥10k px | stops (unsupported opcode) |
+|---|---|---|---|---|---|
+| start (600 frames) | 190 | 19 | 28 | 74 | 11 |
+| end (1200 frames) | 230 | 37 | 26 | 18 | 0 |
+
+The functional bugs the sweep surfaced: the linear-window decode (all >1 MB ROMs that
+write 0xC0), INS/OUTS without port I/O (OUTSW palette loads), colour rendering on mono
+models, and the frame-length drift. Of the 18 large differences left, the ones checked
+(Ring Infinity, Medarot, Hunter X Hunter, Wonder Classic) show the same scene at a
+different animation/fade phase — CPU-timing drift; several others are bad dumps ([f1]).
 
 ## Non-goals (this session)
 

@@ -87,8 +87,25 @@ and the next step recorded in the session notes.
 - Status 2026-11-08: the audio sample stream has landed
   (24 kHz stereo, Swanium's output model, `sst apu_test` 83/83,
   `ws <rom> <suite> wav` writes audio.wav). The frontend has
-  landed too: `goose build src/gooseswan.goose` gives a windowed
+  landed too: `goose build app/gooseswan.goose` gives a windowed
   build (gfx texture path pixel-verified headlessly through
   lavapipe, keyboard input, chunked-mixer audio out, save files
   next to the ROM). Remaining: a real game end to end on real
   hardware, plus polish (gamepad, scaling options).
+
+## M6 — Swanium parity
+- Swanium (the Rust reference implementation) is the bar: pass every
+  public test ROM it passes, and show the same picture on the game
+  library apart from CPU-timing drift.
+- Done when: ws-test-suite 22/22 and WSTimingTest 407/407, and the
+  library sweep (`tools/diff_swanium.py --list`) has no functional
+  differences (black/garbage screens, stops) left.
+- Status 2026-11-08: core/app split (core is a Goose package with a
+  checked boundary); ws-test-suite 16 -> 22/22 (IRQ acceptance delays,
+  REP restart IP, mono model, RTC, SDMA readback, sweep sample points);
+  linear-window decode, Bandai 2003 banks, footer-sized SRAM, mono
+  16 KB WRAM, INS/OUTS port I/O, sprite latch, boot state and exact
+  frame length, all found or confirmed by the differential sweep. See
+  docs/sessions/2026-11-08-core-app-swanium-parity.md. Remaining: the
+  7 WSTimingTest quantisation cases, whatever the sweep still shows,
+  boot ROM execution and save states.

@@ -14,10 +14,13 @@ Rust (cpu / ppu / apu / bus under `crates/core`).
 
 ## Status
 
-M1–M4 complete; M5 (frontend) in progress — see [ROADMAP.md](ROADMAP.md).
-The core passes the SingleStepTests corpora at their fitted baselines,
-WSCpuTest Test All, WSHWTest Test All and 400/407 WSTimingTest timing
-cases. Session notes live in [docs/sessions](docs/sessions).
+M1–M4 complete; M5 (frontend) and M6 (Swanium parity) in progress — see
+[ROADMAP.md](ROADMAP.md). The core passes the SingleStepTests corpora at
+their fitted baselines, WSCpuTest Test All, WSHWTest Test All, 400/407
+WSTimingTest timing cases and all 22 ws-test-suite pass/fail ROMs
+(`tests/ws_test_suite.sh`, opt-in). `tools/diff_swanium.py` compares it
+frame by frame with [Swanium](https://github.com/bubio/Swanium) when a
+sibling checkout is present. Session notes live in [docs/sessions](docs/sessions).
 
 CI (GitHub Actions, modelled on the author's BubiBoyLite setup) builds
 and runs the full battery on every push to main for Linux and macOS;
