@@ -175,6 +175,8 @@ fn refresh_serial() {
     if model_mono && ((io_ports[0xB2] as i64) & 1) != 0 && ((io_ports[0xB3] as i64) & 0x80) != 0 { int_cause |= 0x01; }
 }
 
+var gdma_stall: i64 = 0;
+
 fn run_gdma() {
     var src: i64 = (((io_ports[0x42] as i64) & 0x0F) << 16) | ((io_ports[0x40] as i64) | ((io_ports[0x41] as i64) << 8));
     var dst: i64 = (io_ports[0x44] as i64) | ((io_ports[0x45] as i64) << 8);
@@ -198,7 +200,7 @@ fn run_gdma() {
     io_ports[0x46] = (len & 0xFF) as! u8;
     io_ports[0x47] = ((len >> 8) & 0xFF) as! u8;
     io_ports[0x48] = ((io_ports[0x48] as i64) & 0x7F) as! u8;
-    if moved > 0 { ws_cycles += 5 + moved; }
+    if moved > 0 { gdma_stall += 5 + moved; }  // charged to the OUT that started it (ws_frame), so the frame still spans 40,704 cycles
 }
 
 // ---- Sound DMA (colour only): feeds the voice data latch (port 0x89)
@@ -280,7 +282,9 @@ fn ws_line_events() {
 // enabled and IF is set. Cause bits stay set until software clears them
 // through port B6, as on hardware.
 fn ws_deliver_int() -> bool {
-    let pending: i64 = int_cause & (io_ports[0xB2] as i64);
+    // Causes latch only while enabled, but a latched cause stays pending
+    // after INT_ENABLE changes (Swanium; WSHWTest "IRQs happen when disabled").
+    let pending: i64 = int_cause;
     if pending == 0 { return false; }
     cpu_halted = false;  // a pending enabled interrupt wakes HLT even with IF=0 (it just isn't serviced then; WSTimingTest's HLT case relies on this)
     if (flags & 0x0200) == 0 { return false; }
@@ -300,6 +304,7 @@ fn ws_deliver_int() -> bool {
 var ws_prev_keys: i64 = 0;
 var ws_total: i64 = 0;
 var ws_unsupported: bool = false;
+var ws_frame_carry: i64 = 0;
 
 fn ws_boot() {
     ws_mode = true;
@@ -317,7 +322,7 @@ fn ws_boot() {
     for i in 8 { r[i] = 0; }
     for i in 4 { seg[i] = 0; }
     seg[1] = 0xFFFF; ip = 0; flags = 0;
-    ws_prev_keys = 0; ws_total = 0; ws_unsupported = false;
+    ws_prev_keys = 0; ws_total = 0; ws_unsupported = false; ws_frame_carry = 0;
     sweep_prepaid = 0; sdma_running = false; sdma_clock = 0;
     aud_acc = 0; aud_buf = [];
 }
@@ -326,7 +331,7 @@ fn ws_frame() {
     if keys_state != 0 && ws_prev_keys == 0 { int_cause |= 0x02 & (io_ports[0xB2] as i64); }  // KEY_PRESS cause latches on the press edge, only when enabled
     ws_prev_keys = keys_state;
     rtc_tick(40704);
-    var spent: i64 = 0;
+    var spent: i64 = ws_frame_carry;  // overshoot of the last frame's final instruction (Swanium's cycle_carry)
     while spent < 40704 {
         // Swanium's order: IRQ acceptance (unless held off by the previous
         // instruction), one instruction, then the TF trap for it.
@@ -340,7 +345,8 @@ fn ws_frame() {
             let okc: bool = exec_one(); cyc_in_exec = false;
             if !okc { ws_unsupported = true; return; }
             ws_total += 1;
-            let c: i64 = est_cycles(pre_cx);
+            let c: i64 = est_cycles(pre_cx) + gdma_stall;
+            gdma_stall = 0;
             ws_cycles += c; spent += c;
             if c >= 256 && rep_prefix != 0 && ((dbg_op >= 0xA4 && dbg_op <= 0xAF) || (dbg_op >= 0x6C && dbg_op <= 0x6F)) { irq_ret_override = dbg_ip; }
             if trap_inhibit > 0 { trap_inhibit -= 1; }
@@ -348,6 +354,7 @@ fn ws_frame() {
         } else { ws_cycles += 32; spent += 32; }
         ws_line_events();
     }
+    ws_frame_carry = spent - 40704;
 }
 
 

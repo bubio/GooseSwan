@@ -39,6 +39,13 @@ fn run_ws(path: u8[:]) {
     var frame: i64 = 0;
     var done: bool = false;
     var dismiss: i64 = 0;
+    // Menu-driven ROMs: remember the menu as it stands just before the A press;
+    // once a test has run, coming back to that exact screen ends the run
+    // (otherwise auto-dismiss would restart Test All forever).
+    var menu: u8[1024] = [0; 1024];
+    var menun: i64 = 0;
+    var left_menu: bool = false;
+    var prev_fail: bool = false;
     var page_done: i64 = 0;
     var page_hold: i64 = 0;
     var fb_dump: bool = false;
@@ -62,6 +69,17 @@ fn run_ws(path: u8[:]) {
         ws_frame();
         if ws_unsupported { print("unsupported opcode ", dbg_op, " at cs:ip ", seg[1], ":", dbg_ip, " frame ", frame); let m = ws_screen_text(screen); write_stdout(screen[..m]); exit(1); }
         let n = ws_screen_text(screen);
+        // Report every screen that shows "Failed" (the periodic dumps
+        // below only sample one frame in 2000).
+        var has_fail: bool = false;
+        var fi: i64 = 0;
+        while fi + 5 < n { if screen[fi] == 70 && screen[fi + 1] == 97 && screen[fi + 2] == 105 && screen[fi + 3] == 108 && screen[fi + 4] == 101 && screen[fi + 5] == 100 { has_fail = true; } fi += 1; }
+        if has_fail && !prev_fail { print("failed screen at frame ", frame, ":"); write_stdout(screen[..n]); }
+        prev_fail = has_fail;
+        var at_menu: bool = menun == n;
+        if at_menu { for i in n { if screen[i] != menu[i] { at_menu = false; } } }
+        if menu_idx > 0 && frame == 29 + menu_idx * 4 { for i in n { menu[i] = screen[i]; } menun = n; }
+        if menu_idx > 0 && frame > 40 + menu_idx * 4 { if !at_menu { left_menu = true; } else if left_menu { print("back at the menu at frame ", frame, " after ", ws_total, " instructions"); done = true; } }
         var same: bool = n == lastn;
         if same { for i in n { if screen[i] != last[i] { same = false; } } }
         if same { frozen += 1; } else { frozen = 0; for i in n { last[i] = screen[i]; } lastn = n; }
@@ -197,4 +215,54 @@ fn run_mark(path: u8[:], spec: u8[:]) {
     var screen: u8[1024] = [0; 1024];
     let m = ws_screen_text(screen);
     write_stdout(screen[..m]);
+}
+
+// ---- Differential run (sst run <rom> <frames> <out> [keys] [mono|color]) ----
+// Runs a fixed number of frames with a key script ("f:bits,..." — bits
+// held from frame f on) and writes <out>.hashes (one framebuffer hash
+// per frame), <out>.ppm, <out>.ram (WRAM 0x0000-0xFFFF) and <out>.pcm
+// (s16le stereo 24 kHz) — the formats of the Swanium-side probe, so the
+// two cores can be compared frame by frame.
+fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
+    guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
+    if model == "mono" { model_forced = 0; } else if model == "color" { model_forced = 1; }
+    ws_boot();
+    aud_enabled = true;
+    var sf: i64[>..] = []; var sb: i64[>..] = [];
+    var i: i64 = 0;
+    while i < script.len && script[0] != 45 {
+        var f: i64 = 0; var b: i64 = 0;
+        while i < script.len && script[i] != 58 { f = f * 10 + ((script[i] as i64) - 48); i += 1; }
+        i += 1;
+        while i < script.len && script[i] != 44 { b = b * 10 + ((script[i] as i64) - 48); i += 1; }
+        i += 1;
+        sf.push(f); sb.push(b);
+    }
+    var hashes: u8[>..] = [];
+    var pcm: u8[>..] = [];
+    var keys: i64 = 0;
+    for fr in frames {
+        for k in sf.len { if sf[k] == fr { keys = sb[k]; } }
+        keys_state = keys;
+        ws_frame();
+        if ws_unsupported { print("unsupported opcode ", dbg_op, " at ", seg[1], ":", dbg_ip, " frame ", fr); break; }
+        for k in aud_buf.len { let v: i64 = aud_buf[k]; pcm.push((v & 0xFF) as! u8); pcm.push(((v >> 8) & 0xFF) as! u8); }
+        aud_buf = [];
+        let line = str(fb_hash(), "\n");
+        for k in line.len { hashes.push(line[k]); }
+    }
+    write_file(str(out, ".hashes"), hashes);
+    write_file(str(out, ".pcm"), pcm);
+    var ram: u8[>..] = [];
+    for k in 65536 { ram.push(mem[k]); }
+    write_file(str(out, ".ram"), ram);
+    var ppm: u8[>..] = [];
+    let hdr = "P6\n224 144\n255\n";
+    for k in hdr.len { ppm.push(hdr[k]); }
+    for k in 32256 { let c: i64 = fb[k] as i64; ppm.push((((c >> 8) & 15) * 17) as! u8); ppm.push((((c >> 4) & 15) * 17) as! u8); ppm.push(((c & 15) * 17) as! u8); }
+    write_file(str(out, ".ppm"), ppm);
+    var screen: u8[1024] = [0; 1024];
+    let m = ws_screen_text(screen);
+    write_stdout(screen[..m]);
+    print("fbhash=", fb_hash());
 }
