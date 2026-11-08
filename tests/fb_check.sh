@@ -4,7 +4,7 @@
 # BG+sprites rendering in place). Catches rendering regressions.
 # Usage: tests/fb_check.sh [path-to-sst-binary]
 cd "$(dirname "$0")/.." || exit 1
-SST=${1:-./src/sst}
+SST=${1:-./tools/sst}
 fail=0
 check() {
     got=$("$SST" ws "$1" "$2" fb 2>/dev/null | grep fbhash | cut -d= -f2)

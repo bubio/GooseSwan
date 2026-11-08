@@ -1,5 +1,6 @@
 // GooseSwan CPU core: V30MZ (8086/V20 profiles) state, decoder,
 // executor, and the WSTimingTest-fitted cycle model.
+namespace core;
 
 var mem: u8[1048576] = [0; 1048576];
 var r: u16[8] = [0; 8];      // encoding order: ax cx dx bx sp bp si di
@@ -166,17 +167,15 @@ fn est_cycles(pre_cx: i64) -> i64 {
     return c;
 }
 
-// Deliver the highest-priority pending hardware interrupt, if any is
-// enabled and IF is set. Cause bits stay set until software clears them
-// through port B6, as on hardware.
 fn phys(s: u16, off: u16) -> i64 { (((s as i64) << 4) + (off as i64)) & 0xFFFFF }
 fn rb16(p: i64) -> u16 { (rd8(p) as u16) | ((rd8((p + 1) & 0xFFFFF) as u16) << 8) }
 // Word access through a segment: the second byte wraps at the 64 KB offset
 // boundary (offset 0xFFFF is followed by offset 0x0000), as on real hardware.
 fn seg_rd16(base: i64, off: i64) -> u16 { (rd8((base + off) & 0xFFFFF) as u16) | ((rd8((base + ((off + 1) & 0xFFFF)) & 0xFFFFF) as u16) << 8) }
 fn seg_wr16(base: i64, off: i64, v: u16) { wb8((base + off) & 0xFFFFF, v as! u8); wb8((base + ((off + 1) & 0xFFFF)) & 0xFFFFF, (v >> 8) as! u8); }
-// Memory writes the SST harness made, so a case can restore RAM
-// afterwards; recording is on only while a corpus case executes.
+// Flat-memory mode (ws_mode off) is the CPU test bus the
+// SingleStepTests harness drives: writes are recorded so a case can
+// restore RAM afterwards; recording is on only while a case executes.
 var touched: i64[>..<] = [];
 var recording: bool = false;
 
@@ -898,5 +897,3 @@ fn exec_one() -> bool {
 
     return false;
 }
-
-// ---- Case storage (regs indexed: 0-7 r, 8-11 seg es/cs/ss/ds, 12 ip, 13 flags) ----

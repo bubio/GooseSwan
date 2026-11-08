@@ -1,6 +1,7 @@
 // GooseSwan bus/system: WonderSwan memory map, I/O ports, timers,
-// interrupt latching and delivery, GDMA, serial TX-ready level,
-// and the headless ROM runner.
+// interrupt latching and delivery, GDMA / sound DMA, the serial
+// TX-ready level, and machine boot + one frame (ws_boot/ws_frame).
+namespace core;
 
 // ---- WonderSwan machine mode (selected by the "ws" CLI argument) ----
 // The SST harness keeps using the flat 1 MB array; in WS mode the physical
@@ -147,6 +148,14 @@ fn tick_vbl() {
         if (ctrl & 8) != 0 { set_vbl_count((io_ports[0xA6] as i64) | ((io_ports[0xA7] as i64) << 8)); } else { set_vbl_count(0); }
     } else { set_vbl_count(cnt - 1); }
 }
+
+// The serial TX-ready cause is a level, not a baud timer: with the
+// serial port enabled (SERIAL_CTRL bit 7) and the SERIAL_SEND
+// interrupt enabled, INT_CAUSE bit 0 reads as permanently pending
+// (the UART is always ready to send). It is re-evaluated on writes
+// to the serial data/enable/ctrl ports and cleared only via
+// INT_CAUSE_CLEAR, matching Swanium's refresh model — and it is
+// exactly what WSTimingTest's HLT and IRQ loops measure: their
 fn refresh_serial() {
     // The instant TX-ready latch is a mono-machine behaviour (Swanium
     // gates it the same way). On colour carts it must NOT fire:
@@ -240,174 +249,6 @@ fn sdma_tick(dc: i64) {
     }
 }
 
-// ---- Serial EEPROMs (93Cxx / Microwire), following Swanium's cart
-// device: device 0 = cartridge EEPROM (ports 0xC4-0xC8, present only
-// when the ROM footer's save type says so, 0xFF-filled and write-
-// locked at power-on), device 1 = the console's internal EEPROM
-// (ports 0xBA-0xBE, 2048 bytes, zero-filled, writes enabled, with a
-// protected system range from byte 0x60). One backing store: the
-// cartridge device at offset 0, the internal at offset 2048.
-// A command word is: start bit at bits+2, 2-bit opcode at bits,
-// word address in the low bits; opcode 0 is the extended group
-// (EWDS / WRAL / ERAL / EWEN in the 2 bits below the opcode field).
-var ee_data: u8[4096];
-var ee_input: i64[2];
-var ee_output: i64[2];
-var ee_wen: bool[2];
-var ee_size: i64[2];
-var ee_bits: i64[2];
-var cart_eeprom: bool = false;
-var ie_done: bool = false;
-var ie_delay: i64 = 0;
-var ie_fault: bool = false;
-
-fn ee_execute(dev: i64, comm: i64, bits: i64) {
-    if (comm >> (bits + 3)) != 0 { return; }
-    if ((comm >> (bits + 2)) & 1) == 0 { return; }
-    let opcode: i64 = (comm >> bits) & 3;
-    let base: i64 = dev * 2048;
-    if opcode == 0 {
-        let sub: i64 = (comm >> (bits - 2)) & 3;
-        if sub == 0 { ee_wen[dev] = false; }
-        else if sub == 3 { ee_wen[dev] = true; }
-        else if sub == 1 && ee_wen[dev] {
-            let lo: i64 = ee_input[dev] & 0xFF; let hi: i64 = (ee_input[dev] >> 8) & 0xFF;
-            for i in ee_size[dev] { if i % 2 == 0 { ee_data[base + i] = lo as! u8; } else { ee_data[base + i] = hi as! u8; } }
-        }
-        else if sub == 2 && ee_wen[dev] { for i in ee_size[dev] { ee_data[base + i] = 0xFF; } }
-        return;
-    }
-    let baddr: i64 = (comm & ((1 << bits) - 1)) * 2;
-    if baddr + 1 >= ee_size[dev] { return; }
-    if opcode == 1 && ee_wen[dev] { ee_data[base + baddr] = (ee_input[dev] & 0xFF) as! u8; ee_data[base + baddr + 1] = ((ee_input[dev] >> 8) & 0xFF) as! u8; }
-    else if opcode == 2 { ee_output[dev] = (ee_data[base + baddr] as i64) | ((ee_data[base + baddr + 1] as i64) << 8); }
-    else if opcode == 3 && ee_wen[dev] { ee_data[base + baddr] = 0xFF; ee_data[base + baddr + 1] = 0xFF; }
-}
-
-fn ee_init_cart(save: i64) {
-    cart_eeprom = false; ee_size[0] = 0; ee_bits[0] = 0; ee_wen[0] = false; ee_input[0] = 0; ee_output[0] = 0xFFFF;
-    var size: i64 = 0; var bits: i64 = 0;
-    if save == 0x10 { size = 128; bits = 6; }
-    else if save == 0x50 { size = 1024; bits = 9; }
-    else if save == 0x20 { size = 2048; bits = 10; }
-    if size > 0 { cart_eeprom = true; ee_size[0] = size; ee_bits[0] = bits; for i in size { ee_data[i] = 0xFF; } }
-    ee_size[1] = 2048; ee_bits[1] = 10; ee_wen[1] = true; ee_input[1] = 0; ee_output[1] = 0xFFFF;
-    for i in 2048 { ee_data[2048 + i] = 0; }
-    ie_done = false; ie_delay = 0; ie_fault = false;
-}
-
-// The internal EEPROM speaks two command widths: the start bit at
-// bit 12 selects the 10-bit (colour) form, otherwise the 6-bit
-// mono-compatible form, over the same storage.
-fn ie_bits(comm: i64) -> i64 { if (comm & 0x1000) != 0 { return 10; } return 6; }
-
-fn ie_status_read() -> i64 {
-    var v: i64 = 0x02;
-    if ie_done { v |= 1; }
-    if ie_fault { v |= 0x80; }
-    if ie_delay > 0 { ie_delay -= 1; if ie_delay == 0 { ie_done = true; } }
-    return v;
-}
-
-fn ie_control(v: i64) {
-    let comm: i64 = (io_ports[0xBC] as i64) | ((io_ports[0xBD] as i64) << 8);
-    if v == 0x10 { ee_execute(1, comm, ie_bits(comm)); ie_done = false; ie_delay = 1; }
-    else if v == 0x20 {
-        ee_input[1] = (io_ports[0xBA] as i64) | ((io_ports[0xBB] as i64) << 8);
-        let baddr: i64 = (comm & ((1 << ie_bits(comm)) - 1)) * 2;
-        if baddr >= 0x60 { ie_fault = true; ie_done = true; ie_delay = 0; }
-        else { ee_execute(1, comm, ie_bits(comm)); ie_done = false; ie_delay = 0; }
-    }
-    else if v == 0x40 { ee_execute(1, comm, ie_bits(comm)); ie_done = true; ie_delay = 0; }
-    else { ie_done = false; ie_delay = 0; }
-}
-
-fn ce_control(v: i64) {
-    let op: i64 = v >> 4;
-    let data: i64 = (io_ports[0xC4] as i64) | ((io_ports[0xC5] as i64) << 8);
-    let comm: i64 = (io_ports[0xC6] as i64) | ((io_ports[0xC7] as i64) << 8);
-    var new_data: i64 = data;
-    if op == 1 { ee_execute(0, comm, ee_bits[0]); new_data = ee_output[0]; }
-    else if op == 2 { ee_input[0] = data; ee_execute(0, comm, ee_bits[0]); }
-    else if op == 4 { ee_execute(0, comm, ee_bits[0]); }
-    io_ports[0xC4] = (new_data & 0xFF) as! u8; io_ports[0xC5] = ((new_data >> 8) & 0xFF) as! u8;
-    var done: i64 = 0; if op == 1 || op == 8 { done = 1; }
-    io_ports[0xC8] = ((v & 0xF0) | 0x02 | done) as! u8;
-}
-
-var ee_pass: i64 = 0;
-var ee_fail: i64 = 0;
-
-fn ee_check(name: const u8[:], got: i64, want: i64) {
-    if got == want { ee_pass += 1; }
-    else { ee_fail += 1; print("FAIL ", name, ": got ", got, " want ", want); }
-}
-
-fn ee_reset(save: i64) {
-    for i in 256 { io_ports[i] = 0; }
-    ws_mode = true; ws_mono_cart = false; dbg_op = 0;
-    ee_init_cart(save);
-}
-
-fn eeprom_test() {
-    // Internal EEPROM: Swanium's bus-test sequences, through the ports
-    ee_reset(0);
-    port_wr(0xBC, 0x00); port_wr(0xBD, 0x18); port_wr(0xBE, 0x10);
-    ee_check("ie read done delayed", port_rd(0xBE) & 1, 0);
-    ee_check("ie read done after poll", port_rd(0xBE) & 1, 1);
-    ee_check("ie default word lo", port_rd(0xBA), 0);
-    ee_check("ie default word hi", port_rd(0xBB), 0);
-    ee_reset(0);
-    port_wr(0xBA, 0xEF); port_wr(0xBB, 0xBE); port_wr(0xBC, 0x00); port_wr(0xBD, 0x14); port_wr(0xBE, 0x20);
-    ee_check("ie status ready", port_rd(0xBE) & 2, 2);
-    port_wr(0xBC, 0x00); port_wr(0xBD, 0x18); port_wr(0xBE, 0x10);
-    port_rd(0xBE); port_rd(0xBE);
-    ee_check("ie roundtrip lo", port_rd(0xBA), 0xEF);
-    ee_check("ie roundtrip hi", port_rd(0xBB), 0xBE);
-    ee_reset(0);
-    port_wr(0xBA, 0x55); port_wr(0xBB, 0xAA); port_wr(0xBC, 0x40); port_wr(0xBD, 0x01); port_wr(0xBE, 0x20);
-    port_wr(0xBC, 0x00); port_wr(0xBD, 0x18); port_wr(0xBE, 0x10);
-    port_rd(0xBE); port_rd(0xBE);
-    ee_check("ie mono-width write lo", port_rd(0xBA), 0x55);
-    ee_check("ie mono-width write hi", port_rd(0xBB), 0xAA);
-    ee_reset(0);
-    port_wr(0xBA, 0x34); port_wr(0xBB, 0x12); port_wr(0xBC, 0x30); port_wr(0xBD, 0x14); port_wr(0xBE, 0x20);
-    ee_check("ie protect fault bit", port_rd(0xBE) & 0x80, 0x80);
-    port_wr(0xBC, 0x30); port_wr(0xBD, 0x18); port_wr(0xBE, 0x10);
-    port_rd(0xBE); port_rd(0xBE);
-    ee_check("ie protected word lo", port_rd(0xBA), 0);
-    ee_check("ie protected word hi", port_rd(0xBB), 0);
-    // Cartridge EEPROM (128-byte device, 6-bit commands), through the ports
-    ee_reset(0x10);
-    port_wr(0xC4, 0xCD); port_wr(0xC5, 0xAB); port_wr(0xC6, 0x40); port_wr(0xC7, 0x01); port_wr(0xC8, 0x20);
-    port_wr(0xC6, 0x80); port_wr(0xC7, 0x01); port_wr(0xC8, 0x10);
-    ee_check("ce locked write blocked lo", port_rd(0xC4), 0xFF);
-    ee_check("ce locked write blocked hi", port_rd(0xC5), 0xFF);
-    ee_check("ce read sets DONE", port_rd(0xC8) & 1, 1);
-    ee_check("ce status ready bit", port_rd(0xC8) & 2, 2);
-    port_wr(0xC6, 0x30); port_wr(0xC7, 0x01); port_wr(0xC8, 0x40);
-    ee_check("ce short command keeps DONE clear", port_rd(0xC8) & 1, 0);
-    port_wr(0xC4, 0xCD); port_wr(0xC5, 0xAB); port_wr(0xC6, 0x40); port_wr(0xC7, 0x01); port_wr(0xC8, 0x20);
-    port_wr(0xC6, 0x80); port_wr(0xC7, 0x01); port_wr(0xC8, 0x10);
-    ee_check("ce write after EWEN lo", port_rd(0xC4), 0xCD);
-    ee_check("ce write after EWEN hi", port_rd(0xC5), 0xAB);
-    port_wr(0xC4, 0x00); port_wr(0xC5, 0x00); port_wr(0xC6, 0x41); port_wr(0xC7, 0x01); port_wr(0xC8, 0x20);
-    port_wr(0xC6, 0xC1); port_wr(0xC7, 0x01); port_wr(0xC8, 0x40);
-    port_wr(0xC6, 0x81); port_wr(0xC7, 0x01); port_wr(0xC8, 0x10);
-    ee_check("ce erase restores ones", port_rd(0xC4), 0xFF);
-    port_wr(0xC6, 0x00); port_wr(0xC7, 0x01); port_wr(0xC8, 0x40);
-    port_wr(0xC4, 0x34); port_wr(0xC5, 0x12); port_wr(0xC6, 0x40); port_wr(0xC7, 0x01); port_wr(0xC8, 0x20);
-    port_wr(0xC6, 0x80); port_wr(0xC7, 0x01); port_wr(0xC8, 0x10);
-    ee_check("ce EWDS blocks write lo", port_rd(0xC4), 0xCD);
-    ee_check("ce EWDS blocks write hi", port_rd(0xC5), 0xAB);
-    // No cartridge EEPROM: open bus, writes ignored
-    ee_reset(0);
-    ee_check("ce absent data reads open bus", port_rd(0xC4), 0xFF);
-    ee_check("ce absent status reads open bus", port_rd(0xC8), 0xFF);
-    port_wr(0xC4, 0x55);
-    ee_check("ce absent writes ignored", port_rd(0xC4), 0xFF);
-    print("eeprom_test: ", ee_pass, " passed, ", ee_fail, " failed");
-}
 
 fn ws_line_events() {
     let apu_dc: i64 = ws_cycles - last_tick;
@@ -425,6 +266,9 @@ fn ws_line_events() {
         if completed < 144 { render_line(completed); }
     }
 }
+// Deliver the highest-priority pending hardware interrupt, if any is
+// enabled and IF is set. Cause bits stay set until software clears them
+// through port B6, as on hardware.
 fn ws_deliver_int() -> bool {
     let pending: i64 = int_cause & (io_ports[0xB2] as i64);
     if pending == 0 { return false; }
@@ -436,44 +280,6 @@ fn ws_deliver_int() -> bool {
     return true;
 }
 
-// Memory written during a case, so the next case can restore zeros.
-fn ws_screen_text(buf: u8[:]) -> i64 {
-    let mapbase: i64 = ((io_ports[0x07] as i64) & 0x0F) << 11;
-    let top: i64 = ((io_ports[0x11] as i64) >> 3) & 31;
-    var n: i64 = 0;
-    for y in 18 {
-        let row: i64 = (top + y) & 31;
-        for x in 28 {
-            let c = mem[mapbase + (row * 32 + x) * 2];
-            buf[n] = if c >= 32 && c < 127 { c } else { 46 };  // '.' for non-printables
-            n += 1;
-        }
-        buf[n] = 10; n += 1;
-    }
-    n
-}
-
-fn count_ok(buf: u8[:], n: i64) -> i64 {
-    var cnt: i64 = 0;
-    var i: i64 = 0;
-    while i + 1 < n {
-        if buf[i] == 79 && buf[i + 1] == 107 { cnt += 1; }  // "Ok"
-        i += 1;
-    }
-    cnt
-}
-
-// Run a WonderSwan ROM headlessly: reset to CS=FFFF:0000 (the linear
-// window's modulo decode lands on the cartridge footer), raise VBlank
-// once per frame of executed steps, and script a single A press so menu
-// driven test ROMs start their "Test All". Stops when the screen shows
-// "Ok" at least 7 times (one per suite), when the screen has been frozen
-// for 600 frames (a failure stop inside the ROM), or at the frame cap.
-
-// ---- PPU synthetic self-test (sst ppu_test) ----
-// Hand-built scenes with hand-computed expected pixels: mono palettes and
-// transparency, scroll, hflip, SCR2 windowing, colour palette RAM, the
-// tile-bank bit and 4bpp packed tiles.
 // ---- Machine boot + one frame, shared by the headless runner and
 // the frontend. ws_boot expects the ROM in `rom` and a fresh
 // process state; ws_frame runs exactly one 40,704-cycle frame with
@@ -522,103 +328,5 @@ fn ws_frame() {
     }
 }
 
-// ---- Save-data persistence (used by the frontend): the cartridge
-// SRAM next to the ROM as <rom>.sav, the cartridge EEPROM as
-// <rom>.eep, and the console's internal EEPROM as <rom>.iep.
-fn ws_save_file_name(path: u8[:], ext: const u8[:]) -> u8[>..] {
-    var name: u8[>..] = [];
-    for i in path.len { name.push(path[i]); }
-    for i in ext.len { name.push(ext[i]); }
-    return name;
-}
-
-fn ws_load_saves(path: u8[:]) {
-    var buf: u8[>..] = [];
-    if read_file(ws_save_file_name(path, ".sav"), buf) { var n: i64 = buf.len; if n > 65536 { n = 65536; } for i in n { sram[i] = buf[i]; } }
-    if cart_eeprom { var eb: u8[>..] = []; if read_file(ws_save_file_name(path, ".eep"), eb) { var n: i64 = eb.len; if n > ee_size[0] { n = ee_size[0]; } for i in n { ee_data[i] = eb[i]; } } }
-    var ib: u8[>..] = [];
-    if read_file(ws_save_file_name(path, ".iep"), ib) { var n: i64 = ib.len; if n > 2048 { n = 2048; } for i in n { ee_data[2048 + i] = ib[i]; } }
-}
-
-fn ws_save_saves(path: u8[:]) {
-    var sb: u8[>..] = [];
-    for i in 65536 { sb.push(sram[i]); }
-    write_file(ws_save_file_name(path, ".sav"), sb);
-    if cart_eeprom { var eb: u8[>..] = []; for i in ee_size[0] { eb.push(ee_data[i]); } write_file(ws_save_file_name(path, ".eep"), eb); }
-    var ib: u8[>..] = [];
-    for i in 2048 { ib.push(ee_data[2048 + i]); }
-    write_file(ws_save_file_name(path, ".iep"), ib);
-}
-
-fn run_ws(path: u8[:]) {
-    guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
-    ws_boot();
-    print("rom loaded: ", rom.len, " bytes");
-    var screen: u8[1024] = [0; 1024];
-    var last: u8[1024] = [0; 1024];
-    var lastn: i64 = 0;
-    var frozen: i64 = 0;
-    var menu_idx: i64 = 0;
-    let argv2 = args();
-    var survey: bool = false;
-    var page_target: i64 = 0;
-    if argv2.len > 3 {
-        let a3 = argv2[3];
-        if a3.len > 0 && a3[a3.len - 1] == 43 { survey = true; }
-        if a3 == "logic" || a3 == "logic+" { menu_idx = 1; }
-        else if a3 == "arith" || a3 == "arith+" { menu_idx = 2; }
-        else if a3 == "rot" || a3 == "rot+" { menu_idx = 3; }
-        else if a3 == "misc" || a3 == "misc+" { menu_idx = 4; }
-        else if a3 == "mul" || a3 == "mul+" { menu_idx = 5; }
-        else if a3 == "div" || a3 == "div+" { menu_idx = 6; }
-        else if a3 == "sdiv" || a3 == "sdiv+" { menu_idx = 7; }
-        else if a3.len == 2 && a3[0] == 109 { menu_idx = (a3[1] as i64) - 48; }  // "m1".."m9": generic menu index (WSHWTest)
-        else if a3.len >= 3 && a3[0] == 112 && a3[1] == 103 { page_target = (a3[2] as i64) - 48; if a3.len >= 4 { page_target = page_target * 10 + ((a3[3] as i64) - 48); } }  // "pgN": WSTimingTest page index
-    }
-    var skips: i64 = 0;
-    var skip_hold: i64 = 0;
-    var frame: i64 = 0;
-    var done: bool = false;
-    var dismiss: i64 = 0;
-    var page_done: i64 = 0;
-    var page_hold: i64 = 0;
-    var fb_dump: bool = false;
-    if argv2.len > 4 && (argv2[4] == "fb" || argv2[4] == "fbwav") { fb_dump = true; }
-    var wav_dump: bool = false;
-    if argv2.len > 4 && (argv2[4] == "wav" || argv2[4] == "fbwav") { wav_dump = true; aud_enabled = true; }
-    while frame < 2000000 && !done {
-        keys_state = 0;
-        if skip_hold > 0 { keys_state = 1 << 11; skip_hold -= 1; }
-        if menu_idx > 0 {
-            // tap X3 (down) menu_idx times, one tap per 4 frames, then A
-            let rel: i64 = frame - 30;
-            if rel >= 0 {
-                let tap: i64 = rel / 4;
-                if tap < menu_idx { if rel % 4 < 2 { keys_state = 1 << 6; } }
-                else if rel - menu_idx * 4 < 4 { keys_state = 1 << 10; }
-            }
-        } else if frame >= 30 && frame < 45 { keys_state = 1 << 10; }  // hold A to pick "Test All"
-        if dismiss > 0 { keys_state |= 1 << 10; dismiss -= 1; }  // auto-tap A to dismiss "press any key" HLT waits
-        if page_hold > 0 { keys_state |= 1 << 5; page_hold -= 1; }  // WSTimingTest: X2 (right) advances the page
-        ws_frame();
-        if ws_unsupported { print("unsupported opcode ", dbg_op, " at cs:ip ", seg[1], ":", dbg_ip, " frame ", frame); let m = ws_screen_text(screen); write_stdout(screen[..m]); exit(1); }
-        let n = ws_screen_text(screen);
-        var same: bool = n == lastn;
-        if same { for i in n { if screen[i] != last[i] { same = false; } } }
-        if same { frozen += 1; } else { frozen = 0; for i in n { last[i] = screen[i]; } lastn = n; }
-        if frozen == 200 && cpu_halted { dismiss = 6; }
-        if page_target > 0 && frame > 60 && frozen == 90 && page_done < page_target { page_done += 1; page_hold = 4; frozen = 0; for i in n { last[i] = 0; } lastn = 0; }
-        if survey && frozen >= 90 && skips < 40 { skips += 1; print("survey skip ", skips, " at frame ", frame, " after ", ws_total, " instructions; screen was:"); write_stdout(screen[..n]); skip_hold = 6; frozen = 0; for i in n { last[i] = 0; } lastn = 0; }
-        else if frozen >= 600 { print("screen frozen for 600 frames at frame ", frame, " after ", ws_total, " instructions (waiting for a key: end of Test All or a failure stop)"); done = true; }
-        else if frame % 2000 == 0 { print("frame ", frame, " oks=", count_ok(screen, n)); write_stdout(screen[..n]); }
-        frame += 1;
-    }
-    print("final screen (frame ", frame, ", ", ws_total, " instructions):");
-    print("state: cs:ip=", seg[1], ":", ip, " ax=", r[0], " bx=", r[2], " cx=", r[1], " dx=", r[3], " sp=", r[4], " bp=", r[5], " si=", r[6], " di=", r[7], " flags=", flags, " halted=", cpu_halted, " line=", (ws_cycles % 40704) / 256, " cause=", int_cause, " enable=", io_ports[0xB2], " scr_area=", io_ports[0x07], " p60=", io_ports[0x60], " p01raw=", io_ports[0x01], " p01rd=", port_rd(1));
-    let m = ws_screen_text(screen);
-    write_stdout(screen[..m]);
-    if fb_dump { print("fbhash=", fb_hash()); fb_write_ppm(); print("framebuffer written to framebuffer.ppm"); }
-    if wav_dump { wav_write(); print("audio written to audio.wav samples=", aud_buf.len / 2); }
-}
 
 var ws_mono_cart: bool = false;  // set from the ROM footer in run_ws: mono-only carts get the mono serial behaviour

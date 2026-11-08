@@ -1,7 +1,7 @@
-// ---- GooseSwan frontend (M5): an SDL3 window through Goose's gfx
-// package, keyboard input, and the APU stream played through the
-// audio package's mixer. The machine itself is bus.goose's
-// ws_boot/ws_frame, shared with the headless runner.
+// GooseSwan frontend: an SDL3 window through Goose's gfx package,
+// keyboard input, and the core's audio stream played through the
+// audio package's mixer. The machine is reached only through the core
+// package's API (core/core.goose).
 //
 // Keys: Y pad (left) = WASD, X pad (right) = arrow keys, A = X,
 // B = Z, Start = Return, Escape closes. Saves land next to the ROM
@@ -40,17 +40,17 @@ fn front_parse(s: const u8[:]) -> i64 {
 
 fn front_keys() -> i64 {
     var k: i64 = 0;
-    if gfx::key_down("W") { k |= 1 << 0; }
-    if gfx::key_down("D") { k |= 1 << 1; }
-    if gfx::key_down("S") { k |= 1 << 2; }
-    if gfx::key_down("A") { k |= 1 << 3; }
-    if gfx::key_down("Up") { k |= 1 << 4; }
-    if gfx::key_down("Right") { k |= 1 << 5; }
-    if gfx::key_down("Down") { k |= 1 << 6; }
-    if gfx::key_down("Left") { k |= 1 << 7; }
-    if gfx::key_down("Return") { k |= 1 << 9; }
-    if gfx::key_down("X") { k |= 1 << 10; }
-    if gfx::key_down("Z") { k |= 1 << 11; }
+    if gfx::key_down("W") { k |= core::KEY_Y1; }
+    if gfx::key_down("D") { k |= core::KEY_Y2; }
+    if gfx::key_down("S") { k |= core::KEY_Y3; }
+    if gfx::key_down("A") { k |= core::KEY_Y4; }
+    if gfx::key_down("Up") { k |= core::KEY_X1; }
+    if gfx::key_down("Right") { k |= core::KEY_X2; }
+    if gfx::key_down("Down") { k |= core::KEY_X3; }
+    if gfx::key_down("Left") { k |= core::KEY_X4; }
+    if gfx::key_down("Return") { k |= core::KEY_START; }
+    if gfx::key_down("X") { k |= core::KEY_A; }
+    if gfx::key_down("Z") { k |= core::KEY_B; }
     return k;
 }
 
@@ -64,12 +64,12 @@ fn front_audio_pump() {
         else { audio::release_sound(front_snd[i]); }
     }
     front_snd = copy(ns); front_vox = copy(nv);
-    if !front_audio_ok { aud_buf = []; return; }
+    if !front_audio_ok { core::audio_clear(); return; }
     var pcm: f32[>..] = [];
-    for i in aud_buf.len { pcm.push((aud_buf[i] as f32) / 32768.0); }
-    aud_buf = [];
+    for i in core::audio_len() { pcm.push((core::audio_sample(i) as f32) / 32768.0); }
+    core::audio_clear();
     if pcm.len == 0 { return; }
-    let snd = audio::create_sound(pcm, 24000, 2);
+    let snd = audio::create_sound(pcm, core::AUDIO_RATE as! i32, 2);
     if snd.id == 0 { return; }
     let vox = audio::play(snd);
     front_snd.push(snd); front_vox.push(vox);
@@ -83,10 +83,11 @@ fn front_main() {
     if argv.len > 2 { max_frames = front_parse(argv[2]); }
     var check: bool = false;
     if argv.len > 3 && argv[3] == "check" { check = true; }
-    guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
-    ws_boot();
-    ws_load_saves(path);
-    aud_enabled = true;
+    var image: u8[>..] = [];
+    guard read_file(path, image) else { print("cannot read ", path); exit(1); }
+    core::power_on(image);
+    load_saves(path);
+    core::set_audio(true);
     if !gfx::open("GooseSwan", 672, 432, gfx::NO_VSYNC | gfx::WINDOW_RESIZABLE) { print("gfx: ", gfx::error()); exit(3); }
     let tex = gfx::texture2d(224, 144);
     let smp = gfx::sampler(gfx::NEAREST, gfx::CLAMP);
@@ -94,17 +95,15 @@ fn front_main() {
     front_audio_ok = audio::open(48000);
     if !front_audio_ok { print("audio: ", audio::error(), " (continuing silently)"); }
     var rgba: u8[129024] = [0; 129024];
-    let period: f64 = 40704.0 / 3072000.0;
+    let period: f64 = (core::FRAME_CYCLES as f64) / (core::CPU_HZ as f64);
     var next_t: f64 = gfx::time() + period;
     var frame_no: i64 = 0;
     var running: bool = true;
     while running && gfx::frame() {
         if gfx::key_pressed("Escape") { running = false; }
-        keys_state = front_keys();
-        ws_frame();
-        if ws_unsupported { print("unsupported opcode ", dbg_op, " at cs:ip ", seg[1], ":", dbg_ip); running = false; }
+        if !core::run_frame(front_keys()) { print("unsupported opcode ", core::fault_op(), " at cs:ip ", core::fault_cs(), ":", core::fault_ip()); running = false; }
         for i in 32256 {
-            let c: i64 = fb[i] as i64;
+            let c: i64 = core::fb[i] as i64;
             rgba[i * 4] = (((c >> 8) & 15) * 17) as! u8;
             rgba[i * 4 + 1] = (((c >> 4) & 15) * 17) as! u8;
             rgba[i * 4 + 2] = ((c & 15) * 17) as! u8;
@@ -118,7 +117,7 @@ fn front_main() {
         gfx::end_pass();
         front_audio_pump();
         frame_no += 1;
-        if frame_no % 600 == 0 { ws_save_saves(path); }
+        if frame_no % 600 == 0 { save_saves(path); }
         if max_frames > 0 && frame_no >= max_frames { running = false; }
         let now: f64 = gfx::time();
         if next_t > now { let ms: i64 = ((next_t - now) * 1000.0) as i64; if ms > 0 { sleep_ms(ms); } }
@@ -137,13 +136,13 @@ fn front_main() {
             } }
         } else { bad = -1; }
         print("frontcheck: mismatches=", bad, " of 32256 after ", frame_no, " frames");
-        ws_save_saves(path);
+        save_saves(path);
         audio::close();
         gfx::close();
         if bad != 0 { exit(1); }
         return;
     }
-    ws_save_saves(path);
+    save_saves(path);
     audio::close();
     gfx::close();
 }
