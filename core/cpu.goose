@@ -619,7 +619,7 @@ fn str_digit(base: i64, off: i64, i: i64) -> i64 {
 }
 fn set_str_digit(base: i64, off: i64, i: i64, v: i64) {
     let a: i64 = (base + ((off + (i >> 1)) & 0xFFFF)) & 0xFFFFF;
-    let b: i64 = mem[a];
+    let b: i64 = rd8(a);
     if (i & 1) == 0 { wb8(a, ((b & 0xF0) | v) as! u8); } else { wb8(a, ((b & 0x0F) | (v << 4)) as! u8); }
 }
 
@@ -858,13 +858,13 @@ fn exec_one() -> bool {
     if op == 0xD7 { let off: i64 = ((r[3] as i64) + (get_r8(0))) & 0xFFFF; set_r8(0, rd8((src_seg_base(3) + off) & 0xFFFFF)); return true; }  // XLAT
     if op >= 0xD8 && op <= 0xDF { decode_modrm(); return true; }  // ESC: no coprocessor, no architectural effect
     if op == 0xE4 { let pt: i64 = fetch8(); set_r8(0, if ws_mode { port_rd(pt) as! u8 } else { 0xFF }); return true; }  // IN AL,imm8 (SST rig: open bus reads as FF)
-    if op == 0xE5 { let pt: i64 = fetch8(); if ws_mode { let lo = port_rd(pt); let hi = port_rd(pt + 1); r[0] = ((hi << 8) | lo) as! u16; } else { r[0] = 0xFFFF; } return true; }  // IN AX,imm8
+    if op == 0xE5 { let pt: i64 = fetch8(); if ws_mode { let lo = port_rd(pt); let hi = port_rd((pt + 1) & 0xFF); r[0] = ((hi << 8) | lo) as! u16; } else { r[0] = 0xFFFF; } return true; }  // IN AX,imm8
     if op == 0xE6 { let pt: i64 = fetch8(); if ws_mode { port_wr(pt, get_r8(0)); } return true; }  // OUT imm8,AL
-    if op == 0xE7 { let pt: i64 = fetch8(); if ws_mode { port_wr(pt, r[0] & 0xFF); port_wr(pt + 1, (r[0] >> 8) & 0xFF); } return true; }  // OUT imm8,AX
+    if op == 0xE7 { let pt: i64 = fetch8(); if ws_mode { port_wr(pt, r[0] & 0xFF); port_wr((pt + 1) & 0xFF, (r[0] >> 8) & 0xFF); } return true; }  // OUT imm8,AX
     if op == 0xEC { set_r8(0, if ws_mode { port_rd(r[2] & 0xFF) as! u8 } else { 0xFF }); return true; }  // IN AL,DX
-    if op == 0xED { if ws_mode { let pt: i64 = r[2] & 0xFF; let lo = port_rd(pt); let hi = port_rd(pt + 1); r[0] = ((hi << 8) | lo) as! u16; } else { r[0] = 0xFFFF; } return true; }  // IN AX,DX
+    if op == 0xED { if ws_mode { let pt: i64 = r[2] & 0xFF; let lo = port_rd(pt); let hi = port_rd((pt + 1) & 0xFF); r[0] = ((hi << 8) | lo) as! u16; } else { r[0] = 0xFFFF; } return true; }  // IN AX,DX
     if op == 0xEE { if ws_mode { port_wr(r[2] & 0xFF, get_r8(0)); } return true; }  // OUT DX,AL
-    if op == 0xEF { if ws_mode { let pt: i64 = r[2] & 0xFF; port_wr(pt, r[0] & 0xFF); port_wr(pt + 1, (r[0] >> 8) & 0xFF); } return true; }  // OUT DX,AX
+    if op == 0xEF { if ws_mode { let pt: i64 = r[2] & 0xFF; port_wr(pt, r[0] & 0xFF); port_wr((pt + 1) & 0xFF, (r[0] >> 8) & 0xFF); } return true; }  // OUT DX,AX
     if op == 0x9B { return true; }  // WAIT: no coprocessor attached, a NOP
     if op == 0xF4 && ws_mode { cpu_halted = true; return true; }  // HLT: the runner wakes the CPU on interrupts
     if op == 0xF5 { flags = flags ^ 1; return true; }  // CMC

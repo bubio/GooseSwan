@@ -225,7 +225,7 @@ fn run_gdma() {
     while len > 0 {
         if src >= 0x10000 && src < 0x20000 { break; }
         if src >= 0x80000 && src < 0x90000 && (sys_ctrl1 & 0x08) != 0 { break; }
-        mem[dst & 0xFFFF] = rd8(src);
+        wb8(dst & 0xFFFF, rd8(src));  // through the bus: mono drops writes above 16 KB (Swanium write_wram)
         if dec { src -= 1; dst -= 1; } else { src += 1; dst += 1; }
         src &= 0xFFFFF; dst &= 0xFFFF;
         len -= 1;
