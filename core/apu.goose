@@ -83,7 +83,7 @@ fn sweep_advance(dc: i64) {
         while i < ticks { apu_sweep_tick(); i += 1; }
     } else {
         sweep_ctr += dc;
-        while sweep_ctr > 8192 { sweep_ctr -= 8193; apu_sweep_tick(); }
+        while sweep_ctr >= 8193 { sweep_ctr -= 8193; apu_sweep_tick(); }  // one sweep tick per 8193 CPU cycles (WSHWTest sound sweep)
     }
 }
 
@@ -124,14 +124,21 @@ fn voice_feed(v: i64) {
 
 fn clamp16(v: i64) -> i64 { if v > 32767 { return 32767; } if v < -32768 { return -32768; } return v; }
 
+// Channel ch's current 4-bit level: its wave sample, or for channel 4
+// in noise mode (0x90 bit 7, with CH4 and NOISE_ENABLE on) the LFSR's
+// low bit as 0 / 15.
+fn apu_chan_level(ch: i64, ctrl: i64) -> i64 {
+    if ch == 3 && (ctrl & 0x88) == 0x88 && ((io_ports[0x8E] as i64) & 0x10) != 0 { return if (lfsr & 1) != 0 { 15 } else { 0 }; }
+    return ch_sample[ch];
+}
+
 fn audio_emit() {
     let ctrl: i64 = io_ports[0x90];
     var wl: i64 = 0; var wr: i64 = 0;
     for ch in 4 {
         if (ctrl & (1 << ch)) == 0 { continue; }
         if ch == 1 && (ctrl & 0x20) != 0 { continue; }
-        var s: i64 = ch_sample[ch];
-        if ch == 3 && (ctrl & 0x80) != 0 && ((io_ports[0x8E] as i64) & 0x10) != 0 && (ctrl & 0x88) == 0x88 { if (lfsr & 1) != 0 { s = 15; } else { s = 0; } }
+        let s:   i64 = apu_chan_level(ch, ctrl);
         let vol: i64 = io_ports[0x88 + ch];
         wl += s * (vol >> 4); wr += s * (vol & 0x0F);
     }
@@ -168,8 +175,7 @@ fn apu_out_port(p: i64) -> i64 {
     for ch in 4 {
         if (ctrl & (1 << ch)) == 0 { continue; }
         if ch == 1 && (ctrl & 0x20) != 0 { continue; }
-        var s: i64 = ch_sample[ch];
-        if ch == 3 && (ctrl & 0x80) != 0 && ((io_ports[0x8E] as i64) & 0x10) != 0 && (ctrl & 0x88) == 0x88 { if (lfsr & 1) != 0 { s = 15; } else { s = 0; } }
+        let s:   i64 = apu_chan_level(ch, ctrl);
         let vol: i64 = io_ports[0x88 + ch];
         left += s * (vol >> 4);
         right += s * (vol & 0x0F);

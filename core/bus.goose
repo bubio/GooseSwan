@@ -69,6 +69,10 @@ fn ram_bank() -> i64 { if mapper_2003 { return bk_ram | (bk_ram_hi << 8); } retu
 fn rom0_bank() -> i64 { if mapper_2003 { return bk_rom0 | (bk_rom0_hi << 8); } return bk_rom0; }
 fn rom1_bank() -> i64 { if mapper_2003 { return bk_rom1 | (bk_rom1_hi << 8); } return bk_rom1; }
 
+// CPU read of I/O port p (0x00-0xFF). Ports with live hardware state
+// (line counter, interrupt cause, keypad, EEPROM/RTC, mixer readback,
+// bank registers) are answered from that state; everything else reads
+// the stored byte through the SPHINX mask for the current mode.
 fn port_rd(p: i64) -> i64 {
     if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE4 || dbg_op == 0xE5 || dbg_op == 0xEC || dbg_op == 0xED) { var pre: i64 = 2; if dbg_op == 0xE4 { pre = 4; } else if dbg_op == 0xE5 { pre = 5; } sweep_advance(pre); sweep_prepaid += pre; }  // IN: sweep runs until the sample point (once per instruction)
     if p == 0x02 { return (ws_cycles % 40704) / 256; }  // LCD_LINE: current scanline (159 lines x 256 cycles)
@@ -117,6 +121,11 @@ fn hexval(c: i64) -> i64 {
     if c >= 97 && c <= 102 { return c - 87; }
     return 0;
 }
+// SPHINX I/O register masks, transcribed from WSHWTest's
+// ioRegMasksSPHINXMono / ioRegMasksSPHINX tables: one 4-hex-digit
+// entry per port 0x00-0xB7 (184 ports), "WWAA" = write mask WW and
+// always-set read bits AA. port_rd applies them as
+// (value & write mask) | always-set for ports below 0xB8.
 fn init_io_masks() {
     for i in 256 { io_wmask_m[i] = 0xFF; io_wmask_c[i] = 0xFF; }
     let mono = "3f000700ff00ff001f007f00ff007700ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff003f00ff00ff00ff000000ff000000ff00ff00ff00ff007700770077007700770077007700770070007700700077007000770070007700770077007700770077007700770077007000770070007700700077007000770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ff000000ff000000000000000000000000000000ff006f0000000000000000000000000000000000000000000000000000000000000000000000000000000000ff000700ff000700ff000700ff000700ff00ff00ff00ff00ff001f001700ff00ef00ff00ff00ff000f00ff00ff00ff00ff00ff00ff00ff00ff00ff0003000000ff0000000f000f00ff00ff00ff00ff00ff00ff00ff00ff00ff00000000000000ff00ff00ff00c400ff00ff0000001000";
@@ -134,6 +143,10 @@ var dbg_pwatch_hits: i64 = 0;
 var dbg_pwatch_last: i64 = 0;
 var dbg_pwatch_val:  i64 = 0;
 
+// CPU write of v to I/O port p (0x00-0xFF). The byte is stored first
+// (so later reads see it through the mask), then the port's side
+// effects run: timer reloads, APU resets, DMA triggers, EEPROM/RTC
+// commands, bank switches.
 fn port_wr(p: i64, v: i64) {
     if p == dbg_pwatch { dbg_pwatch_hits += 1; dbg_pwatch_last = ((seg[1] as i64) << 16) | dbg_ip; dbg_pwatch_val = v; }
     if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE6 || dbg_op == 0xE7 || dbg_op == 0xEE || dbg_op == 0xEF) { let pre: i64 = est_cycles(r[1]) - (if dbg_op == 0xE7 || dbg_op == 0xEF { 1 } else { 2 }); if pre > 0 { sweep_advance(pre); sweep_prepaid += pre; } }  // OUT: sweep runs until the write lands (once per instruction)
@@ -303,6 +316,10 @@ fn sdma_tick(dc: i64) {
     }
 }
 
+// Catch the APU / DMA up to ws_cycles and run the per-scanline events
+// for every line boundary crossed since the last call: HBL timer,
+// VBL at line 144, the line-compare IRQ, sprite latching and rendering
+// of the line that just completed.
 fn ws_line_events() {
     let apu_dc: i64 = ws_cycles - last_tick;
     noise_tick(apu_dc);
@@ -316,7 +333,7 @@ fn ws_line_events() {
         if last_line == 144 { tick_vbl(); }
         if last_line == io_ports[0x03] { int_cause |= 0x10 & (io_ports[0xB2] as i64); }
         var completed: i64 = last_line - 1; if completed < 0 { completed += 159; }
-        if completed == 142 { ppu_capture_sprites(true); }
+        if completed == 142 { ppu_capture_sprites(true); }  // latch next frame's sprite table before line 142 renders (Swanium)
         if completed < 144 { render_line(completed); }
         if last_line == 0 { ppu_promote_sprites(); }
     }
@@ -330,7 +347,7 @@ fn ws_deliver_int() -> bool {
     let pending: i64 = int_cause;
     if pending == 0 { return false; }
     cpu_halted = false;  // any latched cause wakes HLT even with IF=0 (it just isn't serviced then; WSTimingTest's HLT case relies on this)
-    if (flags & 0x0200) == 0 { return false; }
+    if (flags & F_IF) == 0 { return false; }
     var bit: i64 = 7;
     while bit > 0 && ((pending >> bit) & 1) == 0 { bit -= 1; }
     let ret: i64 = if irq_ret_override >= 0 { irq_ret_override } else { ip };
@@ -412,7 +429,7 @@ fn ws_frame() {
             ws_cycles += c; spent += c;
             if c >= 256 && rep_prefix != 0 && ((dbg_op >= 0xA4 && dbg_op <= 0xAF) || (dbg_op >= 0x6C && dbg_op <= 0x6F)) { irq_ret_override = dbg_ip; }
             if trap_inhibit > 0 { trap_inhibit -= 1; }
-            else if (flags & 0x0100) != 0 { do_int(1); ws_cycles += 33; spent += 33; }  // TF single-step trap (entry charge fitted from WSTimingTest's trap case)
+            else if (flags & F_TF) != 0 { do_int(1); ws_cycles += 33; spent += 33; }  // TF single-step trap (entry charge fitted from WSTimingTest's trap case)
         } else { ws_cycles += 32; spent += 32; }
         ws_line_events();
     }
