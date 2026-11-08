@@ -223,15 +223,15 @@ fn run_mark(path: u8[:], spec: u8[:]) {
 // per frame), <out>.ppm, <out>.ram (WRAM 0x0000-0xFFFF) and <out>.pcm
 // (s16le stereo 24 kHz) — the formats of the Swanium-side probe, so the
 // two cores can be compared frame by frame.
-var trace_frames: i64 = 0;  // sst run: print the CPU state at the end of the last N frames (GS_TRACE=N)
+var trace_frames: i64 = 0;  // sst run: print the CPU state at the end of the last N frames (GW_TRACE=N)
 
 fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
     var tv: u8[>..] = [];
-    if env("GS_TRACE", tv) { for k in tv.len { trace_frames = trace_frames * 10 + ((tv[k] as i64) - 48); } }
+    if env("GW_TRACE", tv) { for k in tv.len { trace_frames = trace_frames * 10 + ((tv[k] as i64) - 48); } }
     var wv: u8[>..] = [];
     var pv: u8[>..] = [];
-    if env("GS_PWATCH", pv) { dbg_pwatch = 0; for k in pv.len { dbg_pwatch = dbg_pwatch * 10 + ((pv[k] as i64) - 48); } }
-    if env("GS_WATCH", wv) { dbg_watch = 0; for k in wv.len { dbg_watch = dbg_watch * 10 + ((wv[k] as i64) - 48); } }
+    if env("GW_PWATCH", pv) { dbg_pwatch = 0; for k in pv.len { dbg_pwatch = dbg_pwatch * 10 + ((pv[k] as i64) - 48); } }
+    if env("GW_WATCH", wv) { dbg_watch = 0; for k in wv.len { dbg_watch = dbg_watch * 10 + ((wv[k] as i64) - 48); } }
     guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
     if model == "mono" { model_forced = 0; } else if model == "color" { model_forced = 1; }
     ws_boot();

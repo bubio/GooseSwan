@@ -177,7 +177,7 @@ fn seg_wr16(base: i64, off: i64, v: u16) { wb8((base + off) & 0xFFFFF, v as! u8)
 // Flat-memory mode (ws_mode off) is the CPU test bus the
 // SingleStepTests harness drives: writes are recorded so a case can
 // restore RAM afterwards; recording is on only while a case executes.
-// Debug write watchpoint (tools: GS_WATCH): last writer CS:IP and value.
+// Debug write watchpoint (tools: GW_WATCH): last writer CS:IP and value.
 var dbg_watch: i64 = -1;
 var dbg_watch_hits: i64 = 0;
 var dbg_watch_last: i64 = 0;
