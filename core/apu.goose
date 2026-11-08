@@ -14,7 +14,7 @@ fn step_lfsr() {
 fn noise_tick(dc: i64) {
     if ((io_ports[0x8E] as i64) & 0x10) == 0 { return; }        // NOISE_ENABLE
     if ((io_ports[0x90] as i64) & 0x88) != 0x88 { return; }     // channel 4 on + noise mode
-    let pitch: i64 = (io_ports[0x86] as i64) | (((io_ports[0x87] as i64) & 7) << 8);
+    let pitch: i64 = io_ports[0x86] | (((io_ports[0x87] as i64) & 7) << 8);
     let period: i64 = 2048 - pitch;
     noise_acc += dc;
     while noise_acc >= period { noise_acc -= period; step_lfsr(); }
@@ -28,12 +28,12 @@ var sweep_step: i64 = 0;
 var fast_primed: bool = false;
 
 fn apu_pitch(ch: i64) -> i64 {
-    return ((io_ports[0x80 + ch * 2] as i64) | ((io_ports[0x81 + ch * 2] as i64) << 8)) & 0x7FF;
+    return (io_ports[0x80 + ch * 2] | ((io_ports[0x81 + ch * 2] as i64) << 8)) & 0x7FF;
 }
 
 fn apu_read_wave(ch: i64) {
     let base: i64 = ((io_ports[0x8F] as i64) << 6) + ch * 16;
-    let b: i64 = mem[base + (ch_idx[ch] >> 1)] as i64;
+    let b: i64 = mem[base + (ch_idx[ch] >> 1)];
     if (ch_idx[ch] & 1) == 0 { ch_sample[ch] = b & 0x0F; } else { ch_sample[ch] = (b >> 4) & 0x0F; }
 }
 
@@ -52,7 +52,7 @@ fn apu_chan_advance(ch: i64, dc: i64) {
 }
 
 fn apu_sweep_apply() {
-    var delta: i64 = io_ports[0x8C] as i64; if delta >= 128 { delta -= 256; }
+    var delta: i64 = io_ports[0x8C]; if delta >= 128 { delta -= 256; }
     var np: i64 = apu_pitch(2) + delta;
     if np > 2047 { np = 0; } else if np < 0 { np = 2047; }
     io_ports[0x84] = (np & 0xFF) as! u8;
@@ -69,7 +69,7 @@ var sweep_prepaid: i64 = 0;
 
 fn sweep_advance(dc: i64) {
     if dc <= 0 { return; }
-    let ctrl: i64 = io_ports[0x90] as i64;
+    let ctrl: i64 = io_ports[0x90];
     if (ctrl & 0x40) == 0 || (ctrl & 0x04) == 0 { fast_primed = false; return; }
     if ((io_ports[0x95] as i64) & 0x02) != 0 {
         var ticks: i64 = dc;
@@ -84,7 +84,7 @@ fn sweep_advance(dc: i64) {
 
 fn apu_tick(dc: i64) {
     if dc <= 0 { return; }
-    let ctrl: i64 = io_ports[0x90] as i64;
+    let ctrl: i64 = io_ports[0x90];
     for ch in 4 { if (ctrl & (1 << ch)) != 0 { apu_chan_advance(ch, dc); } }
     var sdc: i64 = dc - sweep_prepaid;
     sweep_prepaid = 0;
@@ -120,27 +120,27 @@ fn voice_feed(v: i64) {
 fn clamp16(v: i64) -> i64 { if v > 32767 { return 32767; } if v < -32768 { return -32768; } return v; }
 
 fn audio_emit() {
-    let ctrl: i64 = io_ports[0x90] as i64;
+    let ctrl: i64 = io_ports[0x90];
     var wl: i64 = 0; var wr: i64 = 0;
     for ch in 4 {
         if (ctrl & (1 << ch)) == 0 { continue; }
         if ch == 1 && (ctrl & 0x20) != 0 { continue; }
         var s: i64 = ch_sample[ch];
         if ch == 3 && (ctrl & 0x80) != 0 && ((io_ports[0x8E] as i64) & 0x10) != 0 && (ctrl & 0x88) == 0x88 { if (lfsr & 1) != 0 { s = 15; } else { s = 0; } }
-        let vol: i64 = io_ports[0x88 + ch] as i64;
+        let vol: i64 = io_ports[0x88 + ch];
         wl += s * (vol >> 4); wr += s * (vol & 0x0F);
     }
     wl *= 32; wr *= 32;
     var vl: i64 = 0; var vr: i64 = 0;
     if (ctrl & 0x20) != 0 {
-        let vv: i64 = io_ports[0x94] as i64;
+        let vv: i64 = io_ports[0x94];
         if (vv & 0x04) != 0 { vl = voice_level; } else if (vv & 0x08) != 0 { vl = voice_level >> 1; }
         if (vv & 0x01) != 0 { vr = voice_level; } else if (vv & 0x02) != 0 { vr = voice_level >> 1; }
         vl *= 64; vr *= 64;
     } else { voice_lp_prev = 0; voice_level = 0; }
     let hl, hr = hv_output();
     var l: i64 = wl + vl + hl; var r: i64 = wr + vr + hr;
-    let oc: i64 = io_ports[0x91] as i64;
+    let oc: i64 = io_ports[0x91];
     if (oc & 0x80) != 0 { l = clamp16(l); r = clamp16(r); }
     else { let m: i64 = clamp16((l + r) >> ((oc >> 1) & 3)); l = m; r = m; }
     aud_buf.push(l); aud_buf.push(r);
@@ -158,7 +158,7 @@ fn audio_emit() {
 // pre-charged (their test suites pass without it).
 
 fn apu_out_port(p: i64) -> i64 {
-    let ctrl: i64 = io_ports[0x90] as i64;
+    let ctrl: i64 = io_ports[0x90];
     var left: i64 = 0;
     var right: i64 = 0;
     for ch in 4 {
@@ -166,11 +166,11 @@ fn apu_out_port(p: i64) -> i64 {
         if ch == 1 && (ctrl & 0x20) != 0 { continue; }
         var s: i64 = ch_sample[ch];
         if ch == 3 && (ctrl & 0x80) != 0 && ((io_ports[0x8E] as i64) & 0x10) != 0 && (ctrl & 0x88) == 0x88 { if (lfsr & 1) != 0 { s = 15; } else { s = 0; } }
-        let vol: i64 = io_ports[0x88 + ch] as i64;
+        let vol: i64 = io_ports[0x88 + ch];
         left += s * (vol >> 4);
         right += s * (vol & 0x0F);
     }
-    if (ctrl & 0x20) != 0 { let vv: i64 = io_ports[0x89] as i64; left += vv; right += vv; }
+    if (ctrl & 0x20) != 0 { let vv: i64 = io_ports[0x89]; left += vv; right += vv; }
     var v: i64 = left + right;
     if (p & 0xFE) == 0x96 { v = right; }
     if (p & 0xFE) == 0x98 { v = left; }
@@ -198,13 +198,13 @@ fn hv_sample(ctrl: i64, data: i64) -> i64 {
 }
 
 fn hv_output() -> i64, i64 {
-    let ctrl: i64 = io_ports[0x6A] as i64;
+    let ctrl: i64 = io_ports[0x6A];
     if model_mono || !ppu_color_mode() || (ctrl & 0x80) == 0 { return 0, 0; }
-    let dl: i64 = s16((io_ports[0x64] as i64) | ((io_ports[0x65] as i64) << 8));
-    let dr: i64 = s16((io_ports[0x66] as i64) | ((io_ports[0x67] as i64) << 8));
+    let dl: i64 = s16(io_ports[0x64] | ((io_ports[0x65] as i64) << 8));
+    let dr: i64 = s16(io_ports[0x66] | ((io_ports[0x67] as i64) << 8));
     if dl != 0 || dr != 0 { return dl, dr; }
-    let s: i64 = hv_sample(ctrl, io_ports[0x69] as i64) * 32;
-    let chan: i64 = io_ports[0x6B] as i64;
+    let s: i64 = hv_sample(ctrl, io_ports[0x69]) * 32;
+    let chan: i64 = io_ports[0x6B];
     let l: i64 = if (chan & 0x40) != 0 { s } else { 0 };
     let r: i64 = if (chan & 0x20) != 0 { s } else { 0 };
     return l, r;

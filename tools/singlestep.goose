@@ -23,8 +23,8 @@ fn reg_index(key: u8[:]) -> i64 {
     else if key == "ip" { 12 } else if key == "flags" { 13 } else { -1 }
 }
 fn get_reg_by_index(idx: i64) -> i64 {
-    if idx < 8 { r[idx] as i64 } else if idx < 12 { seg[idx - 8] as i64 }
-    else if idx == 12 { ip as i64 } else { flags as i64 }
+    if idx < 8 { r[idx] } else if idx < 12 { seg[idx - 8] }
+    else if idx == 12 { ip } else { flags }
 }
 fn set_reg_by_index(idx: i64, v: i64) {
     if idx < 8 { r[idx] = v as! u16; } else if idx < 12 { seg[idx - 8] = v as! u16; }
