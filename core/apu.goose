@@ -2,7 +2,7 @@
 // mixer readback ports and the 24 kHz stereo sample stream.
 namespace core;
 
-var lfsr: i64 = 0;          // APU noise LFSR (15-bit, XNOR feedback), read back through ports 92/93
+var lfsr:      i64 = 0;     // APU noise LFSR (15-bit, XNOR feedback), read back through ports 92/93
 var noise_acc: i64 = 0;     // cycles accumulated towards the next LFSR step
 fn step_lfsr() {
     let mode: i64 = (io_ports[0x8E] as i64) & 7;
@@ -19,18 +19,18 @@ fn noise_tick(dc: i64) {
     // QUICK START shuffle polls port 92 with CH4 in wave mode and never ends
     // otherwise. ws-test-suite sound/quirks row 5 offset 2 disagrees.
     if ((io_ports[0x90] as i64) & 0x08) == 0 { return; }        // CH4_ENABLE
-    let pitch: i64 = io_ports[0x86] | (((io_ports[0x87] as i64) & 7) << 8);
+    let pitch:  i64 = io_ports[0x86] | (((io_ports[0x87] as i64) & 7) << 8);
     let period: i64 = 2048 - pitch;
     noise_acc += dc;
     while noise_acc >= period { noise_acc -= period; step_lfsr(); }
 }
 
-var ch_period: i64[4] = [0; 4];
-var ch_idx: i64[4] = [0; 4];
-var ch_sample: i64[4] = [0; 4];
-var sweep_ctr: i64 = 0;
-var sweep_step: i64 = 0;
-var fast_primed: bool = false;
+var ch_period:   i64[4] = [0; 4];
+var ch_idx:      i64[4] = [0; 4];
+var ch_sample:   i64[4] = [0; 4];
+var sweep_ctr:   i64    = 0;
+var sweep_step:  i64    = 0;
+var fast_primed: bool   = false;
 
 fn apu_pitch(ch: i64) -> i64 {
     return (io_ports[0x80 + ch * 2] | ((io_ports[0x81 + ch * 2] as i64) << 8)) & 0x7FF;
@@ -38,13 +38,13 @@ fn apu_pitch(ch: i64) -> i64 {
 
 fn apu_read_wave(ch: i64) {
     let base: i64 = ((io_ports[0x8F] as i64) << 6) + ch * 16;
-    let b: i64 = mem[base + (ch_idx[ch] >> 1)];
+    let b:    i64 = mem[base + (ch_idx[ch] >> 1)];
     if (ch_idx[ch] & 1) == 0 { ch_sample[ch] = b & 0x0F; } else { ch_sample[ch] = (b >> 4) & 0x0F; }
 }
 
 fn apu_chan_advance(ch: i64, dc: i64) {
     let period: i64 = 2048 - apu_pitch(ch);
-    var rem: i64 = dc;
+    var rem:   i64 = dc;
     var first: i64 = ch_period[ch]; if first == 0 { first = 1; }
     if rem < first { ch_period[ch] -= rem; return; }
     rem -= first;
@@ -58,7 +58,7 @@ fn apu_chan_advance(ch: i64, dc: i64) {
 
 fn apu_sweep_apply() {
     var delta: i64 = io_ports[0x8C]; if delta >= 128 { delta -= 256; }
-    var np: i64 = apu_pitch(2) + delta;
+    var np:    i64 = apu_pitch(2) + delta;
     if np > 2047 { np = 0; } else if np < 0 { np = 2047; }
     io_ports[0x84] = (np & 0xFF) as! u8;
     io_ports[0x85] = ((np >> 8) & 0xFF) as! u8;
@@ -108,11 +108,11 @@ fn apu_tick(dc: i64) {
 // then selects stereo (bit 7) or the mono speaker sum with its
 // volume shift. Emission is gated by aud_enabled so the headless
 // test runners pay nothing; the frontend will drain aud_buf.
-var aud_enabled: bool = false;
-var aud_acc: i64 = 0;
-var aud_buf: i64[>..] = [];
-var voice_lp_prev: i64 = 0;
-var voice_level: i64 = 0;
+var aud_enabled:   bool     = false;
+var aud_acc:       i64      = 0;
+var aud_buf:       i64[>..] = [];
+var voice_lp_prev: i64      = 0;
+var voice_level:   i64      = 0;
 
 fn voice_feed(v: i64) {
     if ((io_ports[0x90] as i64) & 0x20) != 0 {
@@ -151,7 +151,6 @@ fn audio_emit() {
     aud_buf.push(l); aud_buf.push(r);
 }
 
-
 // Port accesses land partway through an IN/OUT instruction, not at
 // its end: WSHWTest's fast-sweep CPU-cycle case pins the pitch write
 // to 2 cycles before the end of OUT imm8 (7 cycles, so 5 cycles run
@@ -164,7 +163,7 @@ fn audio_emit() {
 
 fn apu_out_port(p: i64) -> i64 {
     let ctrl: i64 = io_ports[0x90];
-    var left: i64 = 0;
+    var left:  i64 = 0;
     var right: i64 = 0;
     for ch in 4 {
         if (ctrl & (1 << ch)) == 0 { continue; }
@@ -190,7 +189,7 @@ fn apu_out_port(p: i64) -> i64 {
 // vectors in apu_test.
 fn hv_sample(ctrl: i64, data: i64) -> i64 {
     let shift: i64 = ctrl & 3;
-    let mode: i64 = ctrl & 0x0C;
+    let mode:  i64 = ctrl & 0x0C;
     var expanded: i64 = 0;
     if mode == 0 { expanded = data << (8 - shift); }
     else if mode == 4 { expanded = (data - 256) << (8 - shift); }
@@ -208,9 +207,9 @@ fn hv_output() -> i64, i64 {
     let dl: i64 = s16(io_ports[0x64] | ((io_ports[0x65] as i64) << 8));
     let dr: i64 = s16(io_ports[0x66] | ((io_ports[0x67] as i64) << 8));
     if dl != 0 || dr != 0 { return dl, dr; }
-    let s: i64 = hv_sample(ctrl, io_ports[0x69]) * 32;
+    let s:    i64 = hv_sample(ctrl, io_ports[0x69]) * 32;
     let chan: i64 = io_ports[0x6B];
-    let l: i64 = if (chan & 0x40) != 0 { s } else { 0 };
-    let r: i64 = if (chan & 0x20) != 0 { s } else { 0 };
+    let l:    i64 = if (chan & 0x40) != 0 { s } else { 0 };
+    let r:    i64 = if (chan & 0x20) != 0 { s } else { 0 };
     return l, r;
 }

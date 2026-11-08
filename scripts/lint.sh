@@ -1,6 +1,7 @@
 #!/bin/sh
-# Goose has no linter or formatter; its checker's warnings are the lint.
-# Fail if any entry point (app, tools, the core on its own) has one.
+# Goose has no linter; its checker's warnings are the lint. Fail if any
+# entry point (app, tools, the core on its own) has one, or if a source
+# is not in goose format's layout (fix with: goose format core app tools).
 set -e
 cd "$(dirname "$0")/.."
 status=0
@@ -12,5 +13,10 @@ for entry in core/core.goose app/gooswan.goose tools/sst.goose; do
 done
 warn=$(printf '%s' "$warn_all" | grep . | sort -u || true)
 if [ -n "$warn" ]; then echo "$warn" >&2; status=1; fi
-[ $status -eq 0 ] && echo "lint: no warnings" || echo "lint: warnings above (goose check)" >&2
+unformatted=$(goose format --check core app tools 2>&1) || {
+    echo "not formatted (goose format):" >&2
+    echo "$unformatted" >&2
+    status=1
+}
+[ $status -eq 0 ] && echo "lint: no warnings, formatted" || echo "lint: problems above" >&2
 exit $status

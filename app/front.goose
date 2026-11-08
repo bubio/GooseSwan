@@ -47,7 +47,7 @@ extern fn hostaudio_close();
 // 24 kHz, ~53 ms). The device clock thus sets the speed and the stream
 // never runs dry. Without audio, a timer plays that role.
 let FRONT_AUDIO_AHEAD: i64 = 1272;
-let FRONT_MAX_RUN: i64 = 8;   // machine frames per present, at most
+let FRONT_MAX_RUN:     i64 = 8; // machine frames per present, at most
 
 var front_audio_ok: bool = false;
 
@@ -60,8 +60,8 @@ fn front_parse(s: const u8[:]) -> i64 {
 // Turn both pads one step clockwise (Y1->Y2->Y3->Y4->Y1, same for X),
 // compensating for the counter-clockwise screen of vertical games.
 fn front_rotate_pads(k: i64) -> i64 {
-    let y: i64 = k & 15;
-    let x: i64 = (k >> 4) & 15;
+    let y:  i64 = k & 15;
+    let x:  i64 = (k >> 4) & 15;
     let y2: i64 = ((y << 1) | (y >> 3)) & 15;
     let x2: i64 = ((x << 1) | (x >> 3)) & 15;
     return (k & ~255) | y2 | (x2 << 4);
@@ -119,9 +119,9 @@ fn front_main() {
     if !front_audio_ok { print("audio: no output device (continuing silently)"); }
     var rgba: u8[129024] = [0; 129024];
     let period: f64 = (core::FRAME_CYCLES as f64) / core::CPU_HZ;
-    var next_t: f64 = gfx::time() + period;
-    var frame_no: i64 = 0;
-    var running: bool = true;
+    var next_t:   f64  = gfx::time() + period;
+    var frame_no: i64  = 0;
+    var running:  bool = true;
     while running && gfx::frame() {
         if gfx::key_pressed("Escape") { running = false; }
         let keys = front_keys(vertical);

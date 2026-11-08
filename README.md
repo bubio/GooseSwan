@@ -50,8 +50,8 @@ runs a fixed number of frames and verifies the presented picture
 against the emulated framebuffer (headless-friendly).
 
 `sh scripts/build.sh --test` (Linux, macOS, or Git Bash on Windows) runs the core
-purity check, the lint (`scripts/lint.sh`: Goose has no linter or
-formatter, so any `goose check` warning fails it), both builds and the
+purity check, the lint (`scripts/lint.sh`: any `goose check` warning,
+or a source not in `goose format` layout, fails it), both builds and the
 full regression battery.
 
 ## Layout

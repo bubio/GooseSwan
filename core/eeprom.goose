@@ -11,22 +11,22 @@ namespace core;
 // A command word is: start bit at bits+2, 2-bit opcode at bits,
 // word address in the low bits; opcode 0 is the extended group
 // (EWDS / WRAL / ERAL / EWEN in the 2 bits below the opcode field).
-var ee_data: u8[4096];
-var ee_input: i64[2];
-var ee_output: i64[2];
-var ee_wen: bool[2];
-var ee_size: i64[2];
-var ee_bits: i64[2];
+var ee_data:     u8[4096];
+var ee_input:    i64[2];
+var ee_output:   i64[2];
+var ee_wen:      bool[2];
+var ee_size:     i64[2];
+var ee_bits:     i64[2];
 var cart_eeprom: bool = false;
-var ie_done: bool = false;
-var ie_delay: i64 = 0;
-var ie_fault: bool = false;
+var ie_done:     bool = false;
+var ie_delay:    i64  = 0;
+var ie_fault:    bool = false;
 
 fn ee_execute(dev: i64, comm: i64, bits: i64) {
     if (comm >> (bits + 3)) != 0 { return; }
     if ((comm >> (bits + 2)) & 1) == 0 { return; }
     let opcode: i64 = (comm >> bits) & 3;
-    let base: i64 = dev * 2048;
+    let base:   i64 = dev * 2048;
     if opcode == 0 {
         let sub: i64 = (comm >> (bits - 2)) & 3;
         if sub == 0 { ee_wen[dev] = false; }
@@ -84,7 +84,7 @@ fn ie_control(v: i64) {
 }
 
 fn ce_control(v: i64) {
-    let op: i64 = v >> 4;
+    let op:   i64 = v >> 4;
     let data: i64 = io_ports[0xC4] | ((io_ports[0xC5] as i64) << 8);
     let comm: i64 = io_ports[0xC6] | ((io_ports[0xC7] as i64) << 8);
     var new_data: i64 = data;

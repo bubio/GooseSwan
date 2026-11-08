@@ -7,14 +7,14 @@ import json;
 
 // ---- Case state ----
 
-var c_init_regs: i64[14] = [0; 14];
-var c_init_present: bool[14] = [false; 14];
-var c_fin_regs: i64[14] = [0; 14];
-var c_fin_present: bool[14] = [false; 14];
-var c_init_addr: i64[>..<] = [];
-var c_init_val: i64[>..<] = [];
-var c_fin_addr: i64[>..<] = [];
-var c_fin_val: i64[>..<] = [];
+var c_init_regs:    i64[14]   = [0; 14];
+var c_init_present: bool[14]  = [false; 14];
+var c_fin_regs:     i64[14]   = [0; 14];
+var c_fin_present:  bool[14]  = [false; 14];
+var c_init_addr:    i64[>..<] = [];
+var c_init_val:     i64[>..<] = [];
+var c_fin_addr:     i64[>..<] = [];
+var c_fin_val:      i64[>..<] = [];
 
 fn reg_index(key: u8[:]) -> i64 {
     if key == "ax" { 0 } else if key == "cx" { 1 } else if key == "dx" { 2 } else if key == "bx" { 3 }
@@ -45,7 +45,7 @@ fn read_state(rd: json::Reader&, initial: bool) {
         } else if key == "ram" {
             json::each_element(rd) {
                 var pair: i64[2] = [0, 0];
-                var k: i64 = 0;
+                var k:    i64    = 0;
                 json::each_element(rd) { pair[k] = json::read_int(rd); k++; };
                 if initial { c_init_addr.push(pair[0]); c_init_val.push(pair[1]); }
                 else { c_fin_addr.push(pair[0]); c_fin_val.push(pair[1]); }
@@ -62,10 +62,10 @@ fn clear_case() {
 
 // First-failure detail for reporting.
 var f_kind: i64 = 0;  // 1 = register, 2 = ram
-var f_idx: i64 = 0;
+var f_idx:  i64 = 0;
 var f_addr: i64 = 0;
-var f_exp: i64 = 0;
-var f_got: i64 = 0;
+var f_exp:  i64 = 0;
+var f_got:  i64 = 0;
 
 fn run_case() -> i64 {  // 0 pass, 1 fail, 2 unsupported
     // restore memory dirtied by the previous case

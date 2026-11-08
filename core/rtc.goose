@@ -12,12 +12,12 @@ namespace core;
 var rtc_present: bool = false;
 // Battery-backed registers (BCD except weekday): year, month, day,
 // weekday, hour, minute, second, status, alarm hour, alarm minute.
-var rtc_reg: i64[10] = [0; 10];
-var rtc_cmd: i64 = 0;
-var rtc_index: i64 = 0;
-var rtc_remaining: i64 = 0;
-var rtc_unsupported_busy: bool = false;
-var rtc_cycles: i64 = 0;
+var rtc_reg:              i64[10] = [0; 10];
+var rtc_cmd:              i64     = 0;
+var rtc_index:            i64     = 0;
+var rtc_remaining:        i64     = 0;
+var rtc_unsupported_busy: bool    = false;
+var rtc_cycles:           i64     = 0;
 
 fn rtc_to_bcd(v: i64) -> i64 { ((v / 10) << 4) | (v % 10) }
 fn rtc_from_bcd(v: i64) -> i64 { (v >> 4) * 10 + (v & 0x0F) }
@@ -61,9 +61,9 @@ fn rtc_advance_second() {
     if h < 24 { rtc_reg[4] = rtc_to_bcd(h); return; }
     rtc_reg[4] = 0;
     rtc_reg[3] = (rtc_reg[3] + 1) % 7;
-    let year: i64 = rtc_from_bcd(rtc_reg[0]);
+    let year:  i64 = rtc_from_bcd(rtc_reg[0]);
     let month: i64 = rtc_from_bcd(rtc_reg[1]);
-    let d: i64 = rtc_from_bcd(rtc_reg[2]) + 1;
+    let d:     i64 = rtc_from_bcd(rtc_reg[2]) + 1;
     if d <= rtc_days_in_month(month, year) { rtc_reg[2] = rtc_to_bcd(d); return; }
     rtc_reg[2] = 0x01;
     if month + 1 <= 12 { rtc_reg[1] = rtc_to_bcd(month + 1); return; }

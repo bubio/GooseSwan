@@ -12,32 +12,32 @@ namespace core;
 // and variables can be read back directly by the runner.
 var cpu_halted: bool = false;
 
-var ws_mode: bool = false;
-var rom: u8[>..] = [];
+var ws_mode: bool    = false;
+var rom:     u8[>..] = [];
 // Cartridge SRAM, sized from the footer's save-type byte as Swanium does
 // (0 = none: the window reads open bus and ignores writes).
-var sram: u8[524288] = [0; 524288];
-var sram_size: i64 = 0;
+var sram:      u8[524288] = [0; 524288];
+var sram_size: i64        = 0;
 fn sram_size_from_code(c: i64) -> i64 {
     if c == 0x01 { return 8192; } if c == 0x02 { return 32768; } if c == 0x03 { return 131072; }
     if c == 0x04 { return 262144; } if c == 0x05 { return 524288; }
     return 0;
 }
-var bk_ram: i64 = 0xFF;    // port C1
-var bk_rom0: i64 = 0xFF;   // port C2
-var bk_rom1: i64 = 0xFF;   // port C3
-var bk_linear: i64 = 0xFF; // port C0
-var io_ports: u8[256] = [0; 256];
-var int_cause: i64 = 0;
-var sys_ctrl1: i64 = 0x02;  // SYSTEM_CTRL1: bits 0,1,7 are sticky identity bits (bit1 = colour-capable), bits 2,3 writable
-var last_tick: i64 = 0;     // ws_cycles value at the previous ws_line_events call
-var key_select: i64 = 0;
-var keys_state: i64 = 0;   // Y1-4 bits 0-3, X1-4 bits 4-7, Start bit 9, A bit 10, B bit 11
-var ws_cycles: i64 = 0;     // total CPU cycles since reset (WS mode): drives the scanline model
-var last_line: i64 = 0;     // scanline the model has advanced to (0..158)
-var io_wmask_m: i64[256] = [0; 256];   // SPHINX mono-mode port write masks (WSHWTest ioRegMasksSPHINXMono)
+var bk_ram:      i64      = 0xFF; // port C1
+var bk_rom0:     i64      = 0xFF; // port C2
+var bk_rom1:     i64      = 0xFF; // port C3
+var bk_linear:   i64      = 0xFF; // port C0
+var io_ports:    u8[256]  = [0; 256];
+var int_cause:   i64      = 0;
+var sys_ctrl1:   i64      = 0x02; // SYSTEM_CTRL1: bits 0,1,7 are sticky identity bits (bit1 = colour-capable), bits 2,3 writable
+var last_tick:   i64      = 0;    // ws_cycles value at the previous ws_line_events call
+var key_select:  i64      = 0;
+var keys_state:  i64      = 0; // Y1-4 bits 0-3, X1-4 bits 4-7, Start bit 9, A bit 10, B bit 11
+var ws_cycles:   i64      = 0; // total CPU cycles since reset (WS mode): drives the scanline model
+var last_line:   i64      = 0; // scanline the model has advanced to (0..158)
+var io_wmask_m:  i64[256] = [0; 256];  // SPHINX mono-mode port write masks (WSHWTest ioRegMasksSPHINXMono)
 var io_always_m: i64[256] = [0; 256];  // SPHINX mono-mode port always-set read bits
-var io_wmask_c: i64[256] = [0; 256];   // SPHINX colour-mode port write masks (WSHWTest ioRegMasksSPHINX)
+var io_wmask_c:  i64[256] = [0; 256];  // SPHINX colour-mode port write masks (WSHWTest ioRegMasksSPHINX)
 var io_always_c: i64[256] = [0; 256];  // SPHINX colour-mode port always-set read bits
 
 fn rd8(p: i64) -> u8 {
@@ -61,10 +61,10 @@ fn rd8(p: i64) -> u8 {
 // Bandai 2003 carts (footer mapper byte 1) extend each bank register with
 // a high byte (ports 0xD0-0xD5, 16-bit banks); the 2001 ignores them.
 var mapper_2003: bool = false;
-var bk_ram_hi: i64 = 0xFF;
-var bk_rom0_hi: i64 = 0xFF;
-var bk_rom1_hi: i64 = 0xFF;
-var rom_span: i64 = 1;  // smallest power of two >= the ROM size
+var bk_ram_hi:   i64  = 0xFF;
+var bk_rom0_hi:  i64  = 0xFF;
+var bk_rom1_hi:  i64  = 0xFF;
+var rom_span:    i64  = 1; // smallest power of two >= the ROM size
 fn ram_bank() -> i64 { if mapper_2003 { return bk_ram | (bk_ram_hi << 8); } return bk_ram; }
 fn rom0_bank() -> i64 { if mapper_2003 { return bk_rom0 | (bk_rom0_hi << 8); } return bk_rom0; }
 fn rom1_bank() -> i64 { if mapper_2003 { return bk_rom1 | (bk_rom1_hi << 8); } return bk_rom1; }
@@ -129,10 +129,10 @@ fn init_io_masks() {
     }
 }
 // Debug port-write watch (tools: GW_PWATCH).
-var dbg_pwatch: i64 = -1;
+var dbg_pwatch:      i64 = -1;
 var dbg_pwatch_hits: i64 = 0;
 var dbg_pwatch_last: i64 = 0;
-var dbg_pwatch_val: i64 = 0;
+var dbg_pwatch_val:  i64 = 0;
 
 fn port_wr(p: i64, v: i64) {
     if p == dbg_pwatch { dbg_pwatch_hits += 1; dbg_pwatch_last = ((seg[1] as i64) << 16) | dbg_ip; dbg_pwatch_val = v; }
@@ -178,7 +178,7 @@ fn set_vbl_count(v: i64) { io_ports[0xAA] = (v & 0xFF) as! u8; io_ports[0xAB] = 
 fn tick_hbl() {
     let cnt: i64 = hbl_count();
     if cnt == 0 { return; }
-    let ctrl: i64 = io_ports[0xA2];
+    let ctrl:  i64  = io_ports[0xA2];
     let irqen: bool = ((io_ports[0xB2] as i64) & 0x80) != 0;
     if (ctrl & 1) == 0 && !(cnt == 1 && irqen) { return; }  // disabled, except the counter=1 latch quirk (Swanium)
     if cnt == 1 {
@@ -248,12 +248,12 @@ fn run_gdma() {
 // shadows live in ports 0x4A-0x52; source/counter latch into the
 // engine (with shadows for REPEAT) when a stopped engine first ticks
 // with ENABLE set, and are written back to the ports on every step.
-var sdma_running: bool = false;
-var sdma_clock: i64 = 0;
-var sdma_source: i64 = 0;
-var sdma_counter: i64 = 0;
-var sdma_source_shadow: i64 = 0;
-var sdma_counter_shadow: i64 = 0;
+var sdma_running:        bool = false;
+var sdma_clock:          i64  = 0;
+var sdma_source:         i64  = 0;
+var sdma_counter:        i64  = 0;
+var sdma_source_shadow:  i64  = 0;
+var sdma_counter_shadow: i64  = 0;
 
 fn sdma_source_from_ports() -> i64 { (((io_ports[0x4C] as i64) & 0x0F) << 16) | io_ports[0x4A] | ((io_ports[0x4B] as i64) << 8) }
 fn sdma_counter_from_ports() -> i64 { (((io_ports[0x50] as i64) & 0x0F) << 16) | io_ports[0x4E] | ((io_ports[0x4F] as i64) << 8) }
@@ -291,15 +291,14 @@ fn sdma_tick(dc: i64) {
     }
     sdma_clock += dc;
     let rate_bits: i64 = (io_ports[0x52] as i64) & 3;
-    let rate: i64 = if rate_bits == 0 { 6 } else if rate_bits == 1 { 4 } else if rate_bits == 2 { 2 } else { 1 };
-    let period: i64 = 128 * rate;
+    let rate:      i64 = if rate_bits == 0 { 6 } else if rate_bits == 1 { 4 } else if rate_bits == 2 { 2 } else { 1 };
+    let period:    i64 = 128 * rate;
     while sdma_clock >= period {
         sdma_clock -= period;
         sdma_step();
         if !sdma_running { sdma_clock = 0; break; }
     }
 }
-
 
 fn ws_line_events() {
     let apu_dc: i64 = ws_cycles - last_tick;
@@ -342,13 +341,13 @@ fn ws_deliver_int() -> bool {
 // process state; ws_frame runs exactly one 40,704-cycle frame with
 // the current keys_state, delivering interrupts and the TF trap
 // between instructions exactly as the runner always has.
-var ws_prev_keys: i64 = 0;
-var ws_total: i64 = 0;
+var ws_prev_keys:   i64  = 0;
+var ws_total:       i64  = 0;
 var ws_unsupported: bool = false;
-var ws_frame_carry: i64 = 0;
+var ws_frame_carry: i64  = 0;
 // Debug ring: CS:IP and first byte of the last 1024 instructions (cs << 24 | ip << 8 | byte).
-var dbg_ring: i64[1024] = [0; 1024];
-var dbg_ring_pos: i64 = 0;
+var dbg_ring:     i64[1024] = [0; 1024];
+var dbg_ring_pos: i64       = 0;
 
 fn ws_boot() {
     ws_mode = true;
@@ -414,10 +413,9 @@ fn ws_frame() {
     ws_frame_carry = spent - 40704;
 }
 
-
 // Hardware model: the monochrome WonderSwan (model_mono) or a Color-class
 // machine. ws_boot picks it from the cartridge footer's colour flag, as
 // Swanium's HardwareModel::from_color_flag does; model_forced (set via
 // core::set_model before power_on) overrides that choice.
-var model_mono: bool = false;
-var model_forced: i64 = -1;  // -1 = from the footer, 0 = mono, 1 = colour
+var model_mono:   bool = false;
+var model_forced: i64  = -1; // -1 = from the footer, 0 = mono, 1 = colour
