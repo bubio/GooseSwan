@@ -70,7 +70,7 @@ jobs:
           key: test-roms-${{ hashFiles('scripts/fetch_test_roms.sh') }}
 
       - name: Fetch test ROMs
-        run: ./scripts/fetch_test_roms.sh
+        run: sh ./scripts/fetch_test_roms.sh
 
       - name: Cache 8086 corpus
         uses: actions/cache@v4
@@ -79,10 +79,10 @@ jobs:
           key: corpus-${{ hashFiles('scripts/fetch_corpus.sh') }}
 
       - name: Fetch 8086 corpus
-        run: ./scripts/fetch_corpus.sh
+        run: sh ./scripts/fetch_corpus.sh
 
       - name: Build and test
-        run: ./scripts/build_macos.sh --test
+        run: sh ./scripts/build_macos.sh --test
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
