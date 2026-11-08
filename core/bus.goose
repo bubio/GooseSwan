@@ -322,6 +322,12 @@ fn ws_boot() {
     for i in 8 { r[i] = 0; }
     for i in 4 { seg[i] = 0; }
     seg[1] = 0xFFFF; ip = 0; flags = 0;
+    // Direct cartridge boot starts in the state the console bootstrap
+    // leaves behind (Swanium / StoicGoose): a valid stack in mono WRAM,
+    // the speaker volume at max and HW_FLAGS reporting the console type.
+    r[4] = 0x2000;
+    io_ports[0x9E] = 3;
+    sys_ctrl1 = if model_mono { 0x86 } else { 0x87 };
     ws_prev_keys = 0; ws_total = 0; ws_unsupported = false; ws_frame_carry = 0;
     sweep_prepaid = 0; sdma_running = false; sdma_clock = 0;
     aud_acc = 0; aud_buf = [];

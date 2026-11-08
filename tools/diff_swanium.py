@@ -12,7 +12,7 @@ usage: diff_swanium.py <rom> [frames=600] [keys=-] [model]
 import os, subprocess, sys, tempfile, math, struct
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SST = os.path.join(ROOT, "tools", "sst")
+SST = os.environ.get("SST", os.path.join(ROOT, "tools", "sst"))
 PROBE = os.environ.get("SWPROBE", os.path.join(ROOT, "tools", "swprobe", "target", "release", "swprobe"))
 
 
