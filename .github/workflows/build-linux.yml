@@ -1,6 +1,6 @@
 name: Build Linux (amd64)
 
-# BubiBoyLite の CI 構成を下敷きにした GooseSwan 版。
+# BubiBoyLite の CI 構成を下敷きにした Gooswan 版。
 # Goose の公式リリースに linux-arm64 が無いため amd64 のみ
 # （BubiBoyLite は Odin の都合で arm64 もあった）。
 
@@ -86,13 +86,13 @@ jobs:
         env:
           GOOSE_GFX_HEADLESS: "1"
           SDL_AUDIODRIVER: dummy
-        run: ./app/gooseswan tests/roms/WSHWTest.wsc 300 check
+        run: ./app/gooswan tests/roms/WSHWTest.wsc 300 check
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gooseswan-linux-amd64
-          path: app/gooseswan
+          name: gooswan-linux-amd64
+          path: app/gooswan
           if-no-files-found: error
 
   publish-release:

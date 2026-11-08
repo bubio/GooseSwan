@@ -1,4 +1,4 @@
-// GooseSwan bus/system: WonderSwan memory map, I/O ports, timers,
+// Gooswan bus/system: WonderSwan memory map, I/O ports, timers,
 // interrupt latching and delivery, GDMA / sound DMA, the serial
 // TX-ready level, and machine boot + one frame (ws_boot/ws_frame).
 namespace core;

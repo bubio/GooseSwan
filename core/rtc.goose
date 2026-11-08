@@ -1,4 +1,4 @@
-// GooseSwan cartridge real-time clock (ports 0xCA command/status, 0xCB
+// Gooswan cartridge real-time clock (ports 0xCA command/status, 0xCB
 // data), after Swanium's bus/cart/rtc.rs. Present only when the footer
 // says so: flags byte (0xC) bit 2 together with a non-zero mapper byte
 // (0xD) — bit 2 alone is the fast-ROM flag on most retail carts.

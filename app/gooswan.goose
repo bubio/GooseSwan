@@ -1,4 +1,4 @@
-// GooseSwan: the windowed frontend (app). Usage: gooseswan <rom> [frames] [check]
+// Gooswan: the windowed frontend (app). Usage: gooswan <rom> [frames] [check]
 import std;
 import os;
 import gfx;

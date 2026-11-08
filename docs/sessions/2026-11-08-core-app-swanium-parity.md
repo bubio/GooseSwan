@@ -52,7 +52,7 @@ other than std/core modules and any file/stdout/process call.
   re-recorded on that menu screen.
 - `sst run` + `tools/swprobe` (Rust, against `../Swanium`) + `tools/diff_swanium.py`:
   per-frame fb hashes, final fb / WRAM / audio. Frame-exact equality is not expected:
-  the CPU cycle models differ (GooseSwan's REP STOSW is 5+6n, fitted to WSTimingTest;
+  the CPU cycle models differ (Gooswan's REP STOSW is 5+6n, fitted to WSTimingTest;
   Swanium uses 3n), so games drift by a few frames. Use the diff to find functional
   breakage (blank/garbage screens, stops), not timing.
 

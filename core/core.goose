@@ -1,4 +1,4 @@
-// GooseSwan core: the WonderSwan / WonderSwan Color machine as a Goose
+// Gooswan core: the WonderSwan / WonderSwan Color machine as a Goose
 // package (namespace `core`). Frontends and tools import it from their
 // root file with `import core from "../core";`.
 //

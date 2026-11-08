@@ -1,4 +1,4 @@
-// GooseSwan CPU core: V30MZ (8086/V20 profiles) state, decoder,
+// Gooswan CPU core: V30MZ (8086/V20 profiles) state, decoder,
 // executor, and the WSTimingTest-fitted cycle model.
 namespace core;
 
