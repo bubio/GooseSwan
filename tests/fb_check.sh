@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.." || exit 1
 SST=${1:-./tools/sst}
 fail=0
 check() {
-    got=$("$SST" ws "$1" "$2" fb 2>/dev/null | grep fbhash | cut -d= -f2)
+    got=$("$SST" ws "$1" "$2" fb 2>/dev/null | grep fbhash | cut -d= -f2 | tr -d '\r')
     if [ "$got" = "$3" ]; then
         echo "OK   $1 $2 -> $got"
     else

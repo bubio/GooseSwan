@@ -1,0 +1,2 @@
+# Keep LF everywhere: the sh scripts break on a Windows checkout with CRLF.
+* text=auto eol=lf
