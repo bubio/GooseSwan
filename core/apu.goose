@@ -13,7 +13,12 @@ fn step_lfsr() {
 }
 fn noise_tick(dc: i64) {
     if ((io_ports[0x8E] as i64) & 0x10) == 0 { return; }        // NOISE_ENABLE
-    if ((io_ports[0x90] as i64) & 0x88) != 0x88 { return; }     // channel 4 on + noise mode
+    // The LFSR steps with channel 4's period counter whenever the counter
+    // runs (0x90 bit 3), in wavetable mode too; noise mode (bit 7) only picks
+    // the audible output (WSdev wiki, Mesen). Clock Tower relies on this: its
+    // QUICK START shuffle polls port 92 with CH4 in wave mode and never ends
+    // otherwise. ws-test-suite sound/quirks row 5 offset 2 disagrees.
+    if ((io_ports[0x90] as i64) & 0x08) == 0 { return; }        // CH4_ENABLE
     let pitch: i64 = io_ports[0x86] | (((io_ports[0x87] as i64) & 7) << 8);
     let period: i64 = 2048 - pitch;
     noise_acc += dc;
