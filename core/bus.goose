@@ -73,6 +73,7 @@ fn port_rd(p: i64) -> i64 {
     if p == 0xBE { return ie_status_read(); }  // IEEPROM status: ready | done | protect fault (reading polls the read delay)
     if p >= 0xC4 && p <= 0xC7 { if cart_eeprom { return io_ports[p] as i64; } return 0xFF; }  // cart EEPROM latches, else open bus
     if p == 0xC8 { if cart_eeprom { return 0x02 | ((io_ports[0xC8] as i64) & 1); } return 0xFF; }  // cart EEPROM status: ready | DONE
+    if p == 0x52 && ((io_ports[0x60] as i64) & 0x80) != 0 { return (io_ports[0x52] as i64) & 0xDF; }  // SDMA_CTRL: ENABLE reads live (it self-clears on a zero length / at the end), bit 5 does not exist
     if p == 0xC0 { return bk_linear; }
     if p == 0xC1 { return bk_ram; }
     if p == 0xC2 { return bk_rom0; }
@@ -112,7 +113,8 @@ fn port_wr(p: i64, v: i64) {
     if !model_mono && p == 0x69 { io_ports[0x64] = 0; io_ports[0x65] = 0; io_ports[0x66] = 0; io_ports[0x67] = 0; }  // HyperVoice data write clears the direct words
     if p == 0xB3 { io_ports[0xB3] = (v & 0xC4) as! u8; }  // SERIAL_CTRL: only enable/speed/overrun bits exist
     if p == 0xB1 || p == 0xB2 || p == 0xB3 { refresh_serial(); }  // serial TX-ready level feeds INT_CAUSE bit 0
-    if p == 0x48 && (v & 0x80) != 0 { run_gdma(); }  // GDMA trigger: synchronous burst on the enable write
+    if p == 0x48 && (v & 0x80) != 0 { run_gdma(); }
+    if p == 0x52 { sdma_tick(0); }  // SDMA_CTRL: start (or, with a zero length, self-clear ENABLE) right away  // GDMA trigger: synchronous burst on the enable write
     if p == 0xBE { ie_control(v); }  // IEEPROM control: execute the latched command (0xBC/0xBD)
     if p == 0xBF { io_ports[0xBF] = (v & 1) as! u8; }  // IEEPROM-adjacent control: only bit 0 exists
     if !cart_eeprom && p >= 0xC4 && p <= 0xC9 { io_ports[p] = 0; }  // no cart EEPROM: writes ignored
