@@ -98,7 +98,7 @@ fn init_io_masks() {
     }
 }
 fn port_wr(p: i64, v: i64) {
-    if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE6 || dbg_op == 0xE7 || dbg_op == 0xEE || dbg_op == 0xEF) { let pre: i64 = est_cycles(r[1] as i64) - 2; if pre > 0 { sweep_advance(pre); sweep_prepaid += pre; } }  // OUT: sweep runs until the write lands (once per instruction)
+    if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE6 || dbg_op == 0xE7 || dbg_op == 0xEE || dbg_op == 0xEF) { let pre: i64 = est_cycles(r[1] as i64) - (if dbg_op == 0xE7 || dbg_op == 0xEF { 1 } else { 2 }); if pre > 0 { sweep_advance(pre); sweep_prepaid += pre; } }  // OUT: sweep runs until the write lands (once per instruction)
     if p >= 0xA8 && p <= 0xAB { return; }  // HBL/VBL timer counters are read-only
     io_ports[p] = v as! u8;
     if p == 0xA4 { io_ports[0xA8] = v as! u8; }        // writing a timer period also resets its counter (per byte)
