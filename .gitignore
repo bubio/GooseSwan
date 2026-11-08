@@ -9,3 +9,8 @@ tests/data/
 tests/data-v20/
 *.ws
 *.wsc
+
+# Frontend save data
+*.sav
+*.eep
+*.iep

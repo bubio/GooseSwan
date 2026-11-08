@@ -19,6 +19,11 @@ The core passes the SingleStepTests corpora at their fitted baselines,
 WSCpuTest Test All, WSHWTest Test All and 400/407 WSTimingTest timing
 cases. Session notes live in [docs/sessions](docs/sessions).
 
+CI (GitHub Actions, modelled on the author's BubiBoyLite setup) builds
+and runs the full battery on every push to main for Linux and macOS;
+publishing a GitHub Release attaches `gooseswan-<platform>-<arch>.zip`
+(the binary plus this README) to it.
+
 ## Build & run
 
 The test harness (also the headless ROM runner):
