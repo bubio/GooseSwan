@@ -96,7 +96,7 @@ fn port_rd(p: i64) -> i64 {
     if p == 0xBE { return ie_status_read(); }  // IEEPROM status: ready | done | protect fault (reading polls the read delay)
     if p >= 0xC4 && p <= 0xC7 { if cart_eeprom { return io_ports[p] as i64; } return 0xFF; }  // cart EEPROM latches, else open bus
     if p == 0xC8 { if cart_eeprom { return 0x02 | ((io_ports[0xC8] as i64) & 1); } return 0xFF; }  // cart EEPROM status: ready | DONE
-    if p == 0x52 && ((io_ports[0x60] as i64) & 0x80) != 0 { return (io_ports[0x52] as i64) & 0xDF; }  // SDMA_CTRL: ENABLE reads live (it self-clears on a zero length / at the end), bit 5 does not exist
+    if p == 0x52 && ppu_color_mode() { return (io_ports[0x52] as i64) & 0xDF; }  // SDMA_CTRL: ENABLE reads live (it self-clears on a zero length / at the end), bit 5 does not exist
     if p == 0xCA { return if rtc_present { rtc_read_command() } else { 0x90 }; }  // cartridge RTC command/status, open bus when absent
     if p == 0xCB { return if rtc_present { rtc_read_data() } else { 0x90 }; }     // cartridge RTC data
     if p >= 0xD0 && p <= 0xD5 {  // Bandai 2003 bank registers (low bytes alias C1-C3), open bus on the 2001
@@ -109,7 +109,7 @@ fn port_rd(p: i64) -> i64 {
     if p == 0xC2 { return bk_rom0; }
     if p == 0xC3 { return bk_rom1; }
     if p >= 0xB8 { return io_ports[p] as i64; }
-    if ((io_ports[0x60] as i64) & 0x80) != 0 { return ((io_ports[p] as i64) & io_wmask_c[p]) | io_always_c[p]; }  // SYSTEM_CTRL2 VMODE_COLOR selects the mask set
+    if ppu_color_mode() { return ((io_ports[p] as i64) & io_wmask_c[p]) | io_always_c[p]; }  // colour mode (colour model + SYSTEM_CTRL2 bit 7) selects the mask set
     return ((io_ports[p] as i64) & io_wmask_m[p]) | io_always_m[p];
 }
 fn hexval(c: i64) -> i64 {
@@ -128,7 +128,14 @@ fn init_io_masks() {
         io_always_c[i] = hexval(colp[i * 4 + 2]) * 16 + hexval(colp[i * 4 + 3]);
     }
 }
+// Debug port-write watch (tools: GS_PWATCH).
+var dbg_pwatch: i64 = -1;
+var dbg_pwatch_hits: i64 = 0;
+var dbg_pwatch_last: i64 = 0;
+var dbg_pwatch_val: i64 = 0;
+
 fn port_wr(p: i64, v: i64) {
+    if p == dbg_pwatch { dbg_pwatch_hits += 1; dbg_pwatch_last = ((seg[1] as i64) << 16) | dbg_ip; dbg_pwatch_val = v; }
     if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE6 || dbg_op == 0xE7 || dbg_op == 0xEE || dbg_op == 0xEF) { let pre: i64 = est_cycles(r[1] as i64) - (if dbg_op == 0xE7 || dbg_op == 0xEF { 1 } else { 2 }); if pre > 0 { sweep_advance(pre); sweep_prepaid += pre; } }  // OUT: sweep runs until the write lands (once per instruction)
     if p >= 0xA8 && p <= 0xAB { return; }  // HBL/VBL timer counters are read-only
     io_ports[p] = v as! u8;
@@ -339,8 +346,8 @@ var ws_prev_keys: i64 = 0;
 var ws_total: i64 = 0;
 var ws_unsupported: bool = false;
 var ws_frame_carry: i64 = 0;
-// Debug ring: CS:IP and first byte of the last 64 instructions (cs << 24 | ip << 8 | byte).
-var dbg_ring: i64[64] = [0; 64];
+// Debug ring: CS:IP and first byte of the last 1024 instructions (cs << 24 | ip << 8 | byte).
+var dbg_ring: i64[1024] = [0; 1024];
 var dbg_ring_pos: i64 = 0;
 
 fn ws_boot() {
@@ -390,7 +397,7 @@ fn ws_frame() {
         else if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
         if !cpu_halted {
             let pre_cx: i64 = r[1] as i64;
-            dbg_ring[dbg_ring_pos] = ((seg[1] as i64) << 24) | ((ip as i64) << 8) | (rd8(phys(seg[1], ip)) as i64); dbg_ring_pos = (dbg_ring_pos + 1) & 63;
+            dbg_ring[dbg_ring_pos] = ((seg[1] as i64) << 24) | ((ip as i64) << 8) | (rd8(phys(seg[1], ip)) as i64); dbg_ring_pos = (dbg_ring_pos + 1) & 1023;
             fault_chg = 0; cyc_in_exec = true; irq_ret_override = -1;
             let okc: bool = exec_one(); cyc_in_exec = false;
             if !okc { ws_unsupported = true; return; }

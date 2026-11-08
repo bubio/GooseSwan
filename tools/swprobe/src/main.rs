@@ -42,6 +42,8 @@ fn main() {
     let mut ram = vec![0u8; 0x10000];
     for i in 0..0x10000u32 { ram[i as usize] = sys.read_memory_at(i); }
     std::fs::write(format!("{out}.ram"), &ram).unwrap();
+    let io: Vec<u8> = (0..=255u8).map(|p| sys.bus().peek_io(p)).collect();
+    std::fs::write(format!("{out}.io"), io).unwrap();
     let mut w = vec![];
     for s in &audio { w.extend_from_slice(&s.to_le_bytes()); }
     std::fs::write(format!("{out}.pcm"), w).unwrap();

@@ -228,6 +228,10 @@ var trace_frames: i64 = 0;  // sst run: print the CPU state at the end of the la
 fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
     var tv: u8[>..] = [];
     if env("GS_TRACE", tv) { for k in tv.len { trace_frames = trace_frames * 10 + ((tv[k] as i64) - 48); } }
+    var wv: u8[>..] = [];
+    var pv: u8[>..] = [];
+    if env("GS_PWATCH", pv) { dbg_pwatch = 0; for k in pv.len { dbg_pwatch = dbg_pwatch * 10 + ((pv[k] as i64) - 48); } }
+    if env("GS_WATCH", wv) { dbg_watch = 0; for k in wv.len { dbg_watch = dbg_watch * 10 + ((wv[k] as i64) - 48); } }
     guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
     if model == "mono" { model_forced = 0; } else if model == "color" { model_forced = 1; }
     ws_boot();
@@ -251,17 +255,22 @@ fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
         ws_frame();
         if ws_unsupported { print("unsupported opcode ", dbg_op, " at ", seg[1], ":", dbg_ip, " frame ", fr); break; }
         if trace_frames > 0 && fr >= frames - trace_frames { print("frame ", fr, " end cs:ip=", seg[1], ":", ip, " sp=", r[4], " halted=", cpu_halted, " cause=", int_cause, " en=", io_ports[0xB2], " if=", (flags >> 9) & 1, " line=", (ws_cycles % 40704) / 256);
-            for k in 64 { let e: i64 = dbg_ring[(dbg_ring_pos + k) & 63]; print("  ", e >> 24, ":", (e >> 8) & 0xFFFF, " ", e & 0xFF); } }
+            for k in 1024 { let e: i64 = dbg_ring[(dbg_ring_pos + k) & 1023]; print("  ", e >> 24, ":", (e >> 8) & 0xFFFF, " ", e & 0xFF); } }
         for k in aud_buf.len { let v: i64 = aud_buf[k]; pcm.push((v & 0xFF) as! u8); pcm.push(((v >> 8) & 0xFF) as! u8); }
         aud_buf = [];
         let line = str(fb_hash(), "\n");
         for k in line.len { hashes.push(line[k]); }
     }
+    if dbg_pwatch >= 0 { print("port watch ", dbg_pwatch, ": ", dbg_pwatch_hits, " writes, last ", dbg_pwatch_last >> 16, ":", dbg_pwatch_last & 0xFFFF, " op ", dbg_op, " value ", dbg_pwatch_val); }
+    if dbg_watch >= 0 { print("watch ", dbg_watch, ": ", dbg_watch_hits, " writes, last ", dbg_watch_last >> 16, ":", dbg_watch_last & 0xFFFF, " value ", dbg_watch_val); }
     write_file(str(out, ".hashes"), hashes);
     write_file(str(out, ".pcm"), pcm);
     var ram: u8[>..] = [];
-    for k in 65536 { ram.push(mem[k]); }
+    for k in 65536 { ram.push(rd8(k)); }  // through the bus, as the probe reads it (mono: open bus above 16 KB)
     write_file(str(out, ".ram"), ram);
+    var iob: u8[>..] = [];
+    for k in 256 { iob.push(io_ports[k]); }
+    write_file(str(out, ".io"), iob);
     var ppm: u8[>..] = [];
     let hdr = "P6\n224 144\n255\n";
     for k in hdr.len { ppm.push(hdr[k]); }

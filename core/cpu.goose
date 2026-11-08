@@ -177,11 +177,17 @@ fn seg_wr16(base: i64, off: i64, v: u16) { wb8((base + off) & 0xFFFFF, v as! u8)
 // Flat-memory mode (ws_mode off) is the CPU test bus the
 // SingleStepTests harness drives: writes are recorded so a case can
 // restore RAM afterwards; recording is on only while a case executes.
+// Debug write watchpoint (tools: GS_WATCH): last writer CS:IP and value.
+var dbg_watch: i64 = -1;
+var dbg_watch_hits: i64 = 0;
+var dbg_watch_last: i64 = 0;
+var dbg_watch_val: i64 = 0;
 var touched: i64[>..<] = [];
 var recording: bool = false;
 
 fn wb8(p: i64, v: u8) {
     if ws_mode {
+        if p == dbg_watch { dbg_watch_hits += 1; dbg_watch_last = ((seg[1] as i64) << 16) | dbg_ip; dbg_watch_val = v as i64; }
         if p < 0x10000 { if !model_mono || p < 0x4000 { mem[p] = v; } }  // mono: writes above 16 KB go nowhere
         else if p < 0x20000 { if sram_size > 0 { sram[((ram_bank() << 16) | (p & 0xFFFF)) % sram_size] = v; } }
         return;  // writes into the ROM windows are ignored
@@ -537,10 +543,19 @@ fn str_step(op: i64) {
     } else if op == 0xAC || op == 0xAD {  // LODS
         if size16 { r[0] = seg_rd16(sbase, r[6] as i64); } else { set_r8(0, rd8((sbase + (r[6] as i64)) & 0xFFFFF)); }
         r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
-    } else if op == 0x6C || op == 0x6D {  // INS: the port value (open bus) goes to ES:DI
-        if size16 { seg_wr16(dbase, r[7] as i64, 0xFFFF); } else { wb8((dbase + (r[7] as i64)) & 0xFFFFF, 0xFF); }
+    } else if op == 0x6C || op == 0x6D {  // INS: port DX (and DX+1) -> ES:DI; the flat test bus has no ports (open bus)
+        let pt: i64 = (r[2] as i64) & 0xFF;
+        if size16 {
+            let v: i64 = if ws_mode { port_rd(pt) | (port_rd((pt + 1) & 0xFF) << 8) } else { 0xFFFF };
+            seg_wr16(dbase, r[7] as i64, v as! u16);
+        } else { wb8((dbase + (r[7] as i64)) & 0xFFFFF, (if ws_mode { port_rd(pt) } else { 0xFF }) as! u8); }
         r[7] = (((r[7] as i64) + delta) & 0xFFFF) as! u16;
-    } else if op == 0x6E || op == 0x6F {  // OUTS: only the pointer moves (the port write is unobservable)
+    } else if op == 0x6E || op == 0x6F {  // OUTS: DS:SI -> port DX (and DX+1); games load palettes this way
+        if ws_mode {
+            let pt: i64 = (r[2] as i64) & 0xFF;
+            if size16 { let v: i64 = seg_rd16(sbase, r[6] as i64) as i64; port_wr(pt, v & 0xFF); port_wr((pt + 1) & 0xFF, (v >> 8) & 0xFF); }
+            else { port_wr(pt, rd8((sbase + (r[6] as i64)) & 0xFFFFF) as i64); }
+        }
         r[6] = (((r[6] as i64) + delta) & 0xFFFF) as! u16;
     } else {  // SCAS (AE/AF)
         let b: i64 = if size16 { seg_rd16(dbase, r[7] as i64) as i64 } else { rd8((dbase + (r[7] as i64)) & 0xFFFFF) as i64 };

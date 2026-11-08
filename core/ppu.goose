@@ -4,7 +4,7 @@ namespace core;
 
 var fb: u16[32256] = [0; 32256];
 
-fn ppu_color_mode() -> bool { return ((io_ports[0x60] as i64) & 0x80) != 0; }
+fn ppu_color_mode() -> bool { return !model_mono && ((io_ports[0x60] as i64) & 0x80) != 0; }  // a mono WonderSwan ignores the colour-mode bit (Swanium color_rendering_enabled)
 
 fn ppu_tile_pixel(tile: i64, tx: i64, ty: i64) -> i64 {
     let vm: i64 = io_ports[0x60] as i64;
