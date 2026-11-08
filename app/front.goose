@@ -33,8 +33,22 @@ let front_fs = embed_shader("frag", """
     void main() { o = texture(tex, v_uv); }
     """);
 
-var front_snd: audio::Sound[>..] = [];
-var front_vox: audio::Voice[>..] = [];
+// Streaming audio output (hostaudio.c): one SDL3 stream fed every frame.
+extern fn hostaudio_open(rate: i64) -> bool;
+extern fn hostaudio_push(pcm: const i16[:]);
+extern fn hostaudio_queued() -> i64;
+extern fn hostaudio_close();
+
+// Pacing. The machine runs at ~75.47 Hz but presenting is tied to the
+// display (gfx::frame() returns at ~60 Hz on a 60 Hz screen even with
+// NO_VSYNC), so emulation is decoupled from presentation: before each
+// present, run as many machine frames as keep the audio queue at least
+// FRONT_AUDIO_AHEAD stereo frames deep (four machine frames, 318 each at
+// 24 kHz, ~53 ms). The device clock thus sets the speed and the stream
+// never runs dry. Without audio, a timer plays that role.
+let FRONT_AUDIO_AHEAD: i64 = 1272;
+let FRONT_MAX_RUN: i64 = 8;   // machine frames per present, at most
+
 var front_audio_ok: bool = false;
 
 fn front_parse(s: const u8[:]) -> i64 {
@@ -69,25 +83,14 @@ fn front_keys(vertical: bool) -> i64 {
     return if vertical { front_rotate_pads(k) } else { k };
 }
 
+// Append this frame's samples to the stream, right after the previous
+// frame's, so playback is continuous.
 fn front_audio_pump() {
-    // retire finished voices (releasing their sounds), then queue
-    // this frame's samples as one short sound
-    var ns: audio::Sound[>..] = [];
-    var nv: audio::Voice[>..] = [];
-    for i in front_vox.len {
-        if audio::playing(front_vox[i]) { ns.push(front_snd[i]); nv.push(front_vox[i]); }
-        else { audio::release_sound(front_snd[i]); }
-    }
-    front_snd = copy(ns); front_vox = copy(nv);
     if !front_audio_ok { core::audio_clear(); return; }
-    var pcm: f32[>..] = [];
-    for i in core::audio_len() { pcm.push((core::audio_sample(i)) / 32768.0); }
+    var pcm: i16[>..] = [];
+    for i in core::audio_len() { pcm.push(core::audio_sample(i) as! i16); }
     core::audio_clear();
-    if pcm.len == 0 { return; }
-    let snd = audio::create_sound(pcm, core::AUDIO_RATE as! i32, 2);
-    if snd.id == 0 { return; }
-    let vox = audio::play(snd);
-    front_snd.push(snd); front_vox.push(vox);
+    hostaudio_push(pcm[..]);
 }
 
 fn front_main() {
@@ -112,8 +115,8 @@ fn front_main() {
     let tex = gfx::texture2d(tw, th);
     let smp = gfx::sampler(gfx::NEAREST, gfx::CLAMP);
     let pipe = gfx::pipeline(front_vs, front_fs);
-    front_audio_ok = audio::open(48000);
-    if !front_audio_ok { print("audio: ", audio::error(), " (continuing silently)"); }
+    front_audio_ok = hostaudio_open(core::AUDIO_RATE);
+    if !front_audio_ok { print("audio: no output device (continuing silently)"); }
     var rgba: u8[129024] = [0; 129024];
     let period: f64 = (core::FRAME_CYCLES as f64) / core::CPU_HZ;
     var next_t: f64 = gfx::time() + period;
@@ -121,8 +124,27 @@ fn front_main() {
     var running: bool = true;
     while running && gfx::frame() {
         if gfx::key_pressed("Escape") { running = false; }
-        if !core::run_frame(front_keys(vertical)) { print("unsupported opcode ", core::fault_op(), " at cs:ip ", core::fault_cs(), ":", core::fault_ip()); running = false; }
-        for sy in 144 { for sx in 224 {
+        let keys = front_keys(vertical);
+        var ran: i64 = 0;
+        while running && ran < FRONT_MAX_RUN {
+            if front_audio_ok {
+                if hostaudio_queued() >= FRONT_AUDIO_AHEAD { break; }
+            } else {
+                let now: f64 = gfx::time();
+                if now < next_t { break; }
+                next_t += period;
+                if now - next_t > 0.25 { next_t = now + period; }
+            }
+            if !core::run_frame(keys) { print("unsupported opcode ", core::fault_op(), " at cs:ip ", core::fault_cs(), ":", core::fault_ip()); running = false; }
+            front_audio_pump();
+            ran += 1;
+            frame_no += 1;
+            if frame_no % 600 == 0 { save_saves(path); }
+            if max_frames > 0 && frame_no >= max_frames { running = false; }
+        }
+        if ran == 0 { sleep_ms(1); }   // nothing due: yield instead of spinning
+        // convert only when the machine advanced; otherwise redraw the last picture
+        if ran > 0 { for sy in 144 { for sx in 224 {
             let c: i64 = core::fb[sy * 224 + sx];
             // counter-clockwise for vertical games: (sx, sy) -> (sy, 223 - sx)
             let d: i64 = if vertical { ((223 - sx) * 144 + sy) * 4 } else { (sy * 224 + sx) * 4 };
@@ -130,21 +152,13 @@ fn front_main() {
             rgba[d + 1] = (((c >> 4) & 15) * 17) as! u8;
             rgba[d + 2] = ((c & 15) * 17) as! u8;
             rgba[d + 3] = 255;
-        } }
+        } } }
         gfx::update_texture(tex, rgba[..]);
         gfx::begin_screen(float4 { 0.0, 0.0, 0.0, 1.0 });
         gfx::bind(pipe);
         gfx::bind_texture(gfx::FRAGMENT, 0, tex, smp);
         gfx::draw(3);
         gfx::end_pass();
-        front_audio_pump();
-        frame_no += 1;
-        if frame_no % 600 == 0 { save_saves(path); }
-        if max_frames > 0 && frame_no >= max_frames { running = false; }
-        let now: f64 = gfx::time();
-        if next_t > now { let ms: i64 = ((next_t - now) * 1000.0) as i64; if ms > 0 { sleep_ms(ms); } }
-        next_t += period;
-        if gfx::time() - next_t > 0.25 { next_t = gfx::time() + period; }
     }
     if check {
         gfx::frame();
@@ -160,12 +174,12 @@ fn front_main() {
         } else { bad = -1; }
         print("frontcheck: mismatches=", bad, " of 32256 after ", frame_no, " frames");
         save_saves(path);
-        audio::close();
+        hostaudio_close();
         gfx::close();
         if bad != 0 { exit(1); }
         return;
     }
     save_saves(path);
-    audio::close();
+    hostaudio_close();
     gfx::close();
 }
