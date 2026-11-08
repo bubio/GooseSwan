@@ -7,6 +7,11 @@
 // B = Z, Start = Return, Escape closes. Saves land next to the ROM
 // (<rom>.sav / .eep / .iep) on exit and every 600 frames.
 //
+// Vertical games (cartridge footer flag) are shown as Swanium does:
+// the picture turned 90 degrees counter-clockwise in a 144x224-shaped
+// window, and both pads' directions turned with it (pad key n acts as
+// key n+1), so the arrow keys and WASD keep matching the screen.
+//
 // Usage: gooswan <rom> [frames] [check]
 //   frames > 0 stops after that many frames (smoke runs); "check"
 //   then reads the presented screen back and compares it against
@@ -38,7 +43,17 @@ fn front_parse(s: const u8[:]) -> i64 {
     return v;
 }
 
-fn front_keys() -> i64 {
+// Turn both pads one step clockwise (Y1->Y2->Y3->Y4->Y1, same for X),
+// compensating for the counter-clockwise screen of vertical games.
+fn front_rotate_pads(k: i64) -> i64 {
+    let y: i64 = k & 15;
+    let x: i64 = (k >> 4) & 15;
+    let y2: i64 = ((y << 1) | (y >> 3)) & 15;
+    let x2: i64 = ((x << 1) | (x >> 3)) & 15;
+    return (k & ~255) | y2 | (x2 << 4);
+}
+
+fn front_keys(vertical: bool) -> i64 {
     var k: i64 = 0;
     if gfx::key_down("W") { k |= core::KEY_Y1; }
     if gfx::key_down("D") { k |= core::KEY_Y2; }
@@ -51,7 +66,7 @@ fn front_keys() -> i64 {
     if gfx::key_down("Return") { k |= core::KEY_START; }
     if gfx::key_down("X") { k |= core::KEY_A; }
     if gfx::key_down("Z") { k |= core::KEY_B; }
-    return k;
+    return if vertical { front_rotate_pads(k) } else { k };
 }
 
 fn front_audio_pump() {
@@ -89,8 +104,12 @@ fn front_main() {
     load_saves(path);
     sync_rtc_to_host();
     core::set_audio(true);
-    if !gfx::open("Gooswan", 672, 432, gfx::NO_VSYNC | gfx::WINDOW_RESIZABLE) { print("gfx: ", gfx::error()); exit(3); }
-    let tex = gfx::texture2d(224, 144);
+    let vertical = core::is_vertical();
+    // displayed picture size: 224x144, or 144x224 turned for vertical games
+    let tw: i64 = if vertical { 144 } else { 224 };
+    let th: i64 = if vertical { 224 } else { 144 };
+    if !gfx::open("Gooswan", tw * 3, th * 3, gfx::NO_VSYNC | gfx::WINDOW_RESIZABLE) { print("gfx: ", gfx::error()); exit(3); }
+    let tex = gfx::texture2d(tw, th);
     let smp = gfx::sampler(gfx::NEAREST, gfx::CLAMP);
     let pipe = gfx::pipeline(front_vs, front_fs);
     front_audio_ok = audio::open(48000);
@@ -102,14 +121,16 @@ fn front_main() {
     var running: bool = true;
     while running && gfx::frame() {
         if gfx::key_pressed("Escape") { running = false; }
-        if !core::run_frame(front_keys()) { print("unsupported opcode ", core::fault_op(), " at cs:ip ", core::fault_cs(), ":", core::fault_ip()); running = false; }
-        for i in 32256 {
-            let c: i64 = core::fb[i];
-            rgba[i * 4] = (((c >> 8) & 15) * 17) as! u8;
-            rgba[i * 4 + 1] = (((c >> 4) & 15) * 17) as! u8;
-            rgba[i * 4 + 2] = ((c & 15) * 17) as! u8;
-            rgba[i * 4 + 3] = 255;
-        }
+        if !core::run_frame(front_keys(vertical)) { print("unsupported opcode ", core::fault_op(), " at cs:ip ", core::fault_cs(), ":", core::fault_ip()); running = false; }
+        for sy in 144 { for sx in 224 {
+            let c: i64 = core::fb[sy * 224 + sx];
+            // counter-clockwise for vertical games: (sx, sy) -> (sy, 223 - sx)
+            let d: i64 = if vertical { ((223 - sx) * 144 + sy) * 4 } else { (sy * 224 + sx) * 4 };
+            rgba[d] = (((c >> 8) & 15) * 17) as! u8;
+            rgba[d + 1] = (((c >> 4) & 15) * 17) as! u8;
+            rgba[d + 2] = ((c & 15) * 17) as! u8;
+            rgba[d + 3] = 255;
+        } }
         gfx::update_texture(tex, rgba[..]);
         gfx::begin_screen(float4 { 0.0, 0.0, 0.0, 1.0 });
         gfx::bind(pipe);
@@ -129,10 +150,11 @@ fn front_main() {
         gfx::frame();
         let px = gfx::read_pixels(gfx::screen());
         var bad: i64 = 0;
-        if px.len == 672 * 432 * 4 {
-            for y in 144 { for x in 224 {
-                let si: i64 = ((y * 3 + 1) * 672 + (x * 3 + 1)) * 4;
-                let di: i64 = (y * 224 + x) * 4;
+        let ww: i64 = tw * 3;
+        if px.len == ww * th * 3 * 4 {
+            for y in th { for x in tw {
+                let si: i64 = ((y * 3 + 1) * ww + (x * 3 + 1)) * 4;
+                let di: i64 = (y * tw + x) * 4;
                 if px[si] != rgba[di] || px[si + 1] != rgba[di + 1] || px[si + 2] != rgba[di + 2] { bad += 1; }
             } }
         } else { bad = -1; }

@@ -52,6 +52,14 @@ let MODEL_COLOR: i64 = 1;
 fn set_model(m: i64) { model_forced = m; }
 fn is_mono() -> bool { model_mono }
 
+// Whether the cartridge footer marks the game as vertical (flags byte,
+// footer offset 0xC, bit 0): the player holds the console on its side.
+// The core still renders SCREEN_W x SCREEN_H; rotating the picture and
+// the pads is the frontend's job.
+fn is_vertical() -> bool {
+    return rom.len > 16 && ((rom[rom.len - 4] as i64) & 1) != 0;
+}
+
 // Power on with a cartridge image (the whole .ws/.wsc file).
 fn power_on(image: const u8[:]) {
     rom = [];
