@@ -85,7 +85,7 @@ fn audio_clear() { aud_buf = []; }
 
 // Save media. save_size is 0 when the cartridge has no such device.
 fn save_size(kind: i64) -> i64 {
-    if kind == SAVE_SRAM { return 65536; }
+    if kind == SAVE_SRAM { return sram_size; }
     if kind == SAVE_CART_EEPROM { return if cart_eeprom { ee_size[0] } else { 0 }; }
     if kind == SAVE_INTERNAL_EEPROM { return 2048; }
     if kind == SAVE_RTC { return if rtc_present { 10 } else { 0 }; }

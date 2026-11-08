@@ -183,7 +183,7 @@ var recording: bool = false;
 fn wb8(p: i64, v: u8) {
     if ws_mode {
         if p < 0x10000 { mem[p] = v; }
-        else if p < 0x20000 { sram[(((ram_bank() << 16) | (p & 0xFFFF)) % 65536) as i64] = v; }
+        else if p < 0x20000 { if sram_size > 0 { sram[((ram_bank() << 16) | (p & 0xFFFF)) % sram_size] = v; } }
         return;  // writes into the ROM windows are ignored
     }
     mem[p] = v; if recording { touched.push(p); }

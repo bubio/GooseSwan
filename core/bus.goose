@@ -14,7 +14,15 @@ var cpu_halted: bool = false;
 
 var ws_mode: bool = false;
 var rom: u8[>..] = [];
-var sram: u8[65536] = [0; 65536];
+// Cartridge SRAM, sized from the footer's save-type byte as Swanium does
+// (0 = none: the window reads open bus and ignores writes).
+var sram: u8[524288] = [0; 524288];
+var sram_size: i64 = 0;
+fn sram_size_from_code(c: i64) -> i64 {
+    if c == 0x01 { return 8192; } if c == 0x02 { return 32768; } if c == 0x03 { return 131072; }
+    if c == 0x04 { return 262144; } if c == 0x05 { return 524288; }
+    return 0;
+}
 var bk_ram: i64 = 0xFF;    // port C1
 var bk_rom0: i64 = 0xFF;   // port C2
 var bk_rom1: i64 = 0xFF;   // port C3
@@ -35,7 +43,7 @@ var io_always_c: i64[256] = [0; 256];  // SPHINX colour-mode port always-set rea
 fn rd8(p: i64) -> u8 {
     if !ws_mode { return mem[p]; }
     if p < 0x10000 { return mem[p]; }
-    if p < 0x20000 { return sram[(((ram_bank() << 16) | (p & 0xFFFF)) % 65536) as i64]; }
+    if p < 0x20000 { if sram_size == 0 { return 0x90; } return sram[((ram_bank() << 16) | (p & 0xFFFF)) % sram_size]; }
     if rom.len == 0 { return 0xFF; }
     // Banked windows and the linear window decode as Swanium's cartridge:
     // (bank << 16 | offset) and (C0 << 20 | address), modulo the ROM. A
@@ -341,6 +349,8 @@ fn ws_boot() {
     cpu_mz = true;
     if rom.len > 16 { model_mono = (rom[rom.len - 9] as i64) == 0; }
     if model_forced >= 0 { model_mono = model_forced == 0; }
+    sram_size = if rom.len > 16 { sram_size_from_code(rom[rom.len - 5] as i64) } else { 0 };
+    for i in 524288 { sram[i] = 0; }
     if rom.len > 16 { ee_init_cart(rom[rom.len - 5] as i64); rtc_power_on(rom[rom.len - 4] as i64, rom[rom.len - 3] as i64); }
     for i in 1048576 { mem[i] = 0; }
     for i in 256 { io_ports[i] = 0; }
