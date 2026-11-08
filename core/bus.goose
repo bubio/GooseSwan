@@ -42,7 +42,7 @@ var io_always_c: i64[256] = [0; 256];  // SPHINX colour-mode port always-set rea
 
 fn rd8(p: i64) -> u8 {
     if !ws_mode { return mem[p]; }
-    if p < 0x10000 { return mem[p]; }
+    if p < 0x10000 { if model_mono && p >= 0x4000 { return 0x90; } return mem[p]; }  // mono: 16 KB of WRAM, open bus above
     if p < 0x20000 { if sram_size == 0 { return 0x90; } return sram[((ram_bank() << 16) | (p & 0xFFFF)) % sram_size]; }
     if rom.len == 0 { return 0xFF; }
     // Banked windows and the linear window decode as Swanium's cartridge:

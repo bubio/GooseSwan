@@ -182,7 +182,7 @@ var recording: bool = false;
 
 fn wb8(p: i64, v: u8) {
     if ws_mode {
-        if p < 0x10000 { mem[p] = v; }
+        if p < 0x10000 { if !model_mono || p < 0x4000 { mem[p] = v; } }  // mono: writes above 16 KB go nowhere
         else if p < 0x20000 { if sram_size > 0 { sram[((ram_bank() << 16) | (p & 0xFFFF)) % sram_size] = v; } }
         return;  // writes into the ROM windows are ignored
     }
