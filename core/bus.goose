@@ -18,7 +18,7 @@ var sram: u8[65536] = [0; 65536];
 var bk_ram: i64 = 0xFF;    // port C1
 var bk_rom0: i64 = 0xFF;   // port C2
 var bk_rom1: i64 = 0xFF;   // port C3
-var bk_linear: i64 = 0;    // port C0
+var bk_linear: i64 = 0xFF; // port C0
 var io_ports: u8[256] = [0; 256];
 var int_cause: i64 = 0;
 var sys_ctrl1: i64 = 0x02;  // SYSTEM_CTRL1: bits 0,1,7 are sticky identity bits (bit1 = colour-capable), bits 2,3 writable
@@ -35,16 +35,31 @@ var io_always_c: i64[256] = [0; 256];  // SPHINX colour-mode port always-set rea
 fn rd8(p: i64) -> u8 {
     if !ws_mode { return mem[p]; }
     if p < 0x10000 { return mem[p]; }
-    if p < 0x20000 { return sram[(((bk_ram << 16) | (p & 0xFFFF)) % 65536) as i64]; }
+    if p < 0x20000 { return sram[(((ram_bank() << 16) | (p & 0xFFFF)) % 65536) as i64]; }
     if rom.len == 0 { return 0xFF; }
-    if p < 0x30000 { return rom[(((bk_rom0 << 16) | (p & 0xFFFF)) % rom.len) as i64]; }
-    if p < 0x40000 { return rom[(((bk_rom1 << 16) | (p & 0xFFFF)) % rom.len) as i64]; }
-    // The linear window is top-aligned: at reset the ROM's last bytes (the
-    // footer with the entry jump) sit at the top of the address space. For
-    // power-of-two sizes up to 1 MB this equals the plain modulo decode;
-    // WSHWTest's 768 KB image (address space 0x40000-0xFFFFF) needs the shift.
-    return rom[(((bk_linear << 20) + (p & 0xFFFFF) + rom.len - 0x100000) % rom.len) as i64];
+    // Banked windows and the linear window decode as Swanium's cartridge:
+    // (bank << 16 | offset) and (C0 << 20 | address), modulo the ROM. A
+    // non-power-of-two image (WSHWTest's 768 KB) sits at the top of the
+    // next power-of-two space, as on a real cartridge; below it is open bus.
+    var off: i64 = 0;
+    if p < 0x30000 { off = (rom0_bank() << 16) | (p & 0xFFFF); }
+    else if p < 0x40000 { off = (rom1_bank() << 16) | (p & 0xFFFF); }
+    else { off = (bk_linear << 20) | (p & 0xFFFFF); }
+    let idx: i64 = (off % rom_span) - (rom_span - rom.len);
+    if idx < 0 { return 0xFF; }
+    return rom[idx];
 }
+
+// Bandai 2003 carts (footer mapper byte 1) extend each bank register with
+// a high byte (ports 0xD0-0xD5, 16-bit banks); the 2001 ignores them.
+var mapper_2003: bool = false;
+var bk_ram_hi: i64 = 0xFF;
+var bk_rom0_hi: i64 = 0xFF;
+var bk_rom1_hi: i64 = 0xFF;
+var rom_span: i64 = 1;  // smallest power of two >= the ROM size
+fn ram_bank() -> i64 { if mapper_2003 { return bk_ram | (bk_ram_hi << 8); } return bk_ram; }
+fn rom0_bank() -> i64 { if mapper_2003 { return bk_rom0 | (bk_rom0_hi << 8); } return bk_rom0; }
+fn rom1_bank() -> i64 { if mapper_2003 { return bk_rom1 | (bk_rom1_hi << 8); } return bk_rom1; }
 
 fn port_rd(p: i64) -> i64 {
     if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE4 || dbg_op == 0xE5 || dbg_op == 0xEC || dbg_op == 0xED) { var pre: i64 = 2; if dbg_op == 0xE4 { pre = 4; } else if dbg_op == 0xE5 { pre = 5; } sweep_advance(pre); sweep_prepaid += pre; }  // IN: sweep runs until the sample point (once per instruction)
@@ -76,6 +91,11 @@ fn port_rd(p: i64) -> i64 {
     if p == 0x52 && ((io_ports[0x60] as i64) & 0x80) != 0 { return (io_ports[0x52] as i64) & 0xDF; }  // SDMA_CTRL: ENABLE reads live (it self-clears on a zero length / at the end), bit 5 does not exist
     if p == 0xCA { return if rtc_present { rtc_read_command() } else { 0x90 }; }  // cartridge RTC command/status, open bus when absent
     if p == 0xCB { return if rtc_present { rtc_read_data() } else { 0x90 }; }     // cartridge RTC data
+    if p >= 0xD0 && p <= 0xD5 {  // Bandai 2003 bank registers (low bytes alias C1-C3), open bus on the 2001
+        if !mapper_2003 { return 0x90; }
+        if p == 0xD0 { return bk_ram; } if p == 0xD1 { return bk_ram_hi; } if p == 0xD2 { return bk_rom0; }
+        if p == 0xD3 { return bk_rom0_hi; } if p == 0xD4 { return bk_rom1; } return bk_rom1_hi;
+    }
     if p == 0xC0 { return bk_linear; }
     if p == 0xC1 { return bk_ram; }
     if p == 0xC2 { return bk_rom0; }
@@ -126,6 +146,10 @@ fn port_wr(p: i64, v: i64) {
     else if p == 0xB6 { int_cause = int_cause & ~v; }  // INT_CAUSE_CLEAR
     else if p == 0xCA { if rtc_present { rtc_write_command(v); } }
     else if p == 0xCB { if rtc_present { rtc_write_data(v); } }
+    else if p >= 0xD0 && p <= 0xD5 && mapper_2003 {
+        if p == 0xD0 { bk_ram = v; } else if p == 0xD1 { bk_ram_hi = v; } else if p == 0xD2 { bk_rom0 = v; }
+        else if p == 0xD3 { bk_rom0_hi = v; } else if p == 0xD4 { bk_rom1 = v; } else { bk_rom1_hi = v; }
+    }
     else if p == 0xC0 { bk_linear = v & 0x3F; }
     else if p == 0xC1 { bk_ram = v; }
     else if p == 0xC2 { bk_rom0 = v; }
@@ -307,6 +331,9 @@ var ws_prev_keys: i64 = 0;
 var ws_total: i64 = 0;
 var ws_unsupported: bool = false;
 var ws_frame_carry: i64 = 0;
+// Debug ring: CS:IP and first byte of the last 64 instructions (cs << 24 | ip << 8 | byte).
+var dbg_ring: i64[64] = [0; 64];
+var dbg_ring_pos: i64 = 0;
 
 fn ws_boot() {
     ws_mode = true;
@@ -317,7 +344,10 @@ fn ws_boot() {
     if rom.len > 16 { ee_init_cart(rom[rom.len - 5] as i64); rtc_power_on(rom[rom.len - 4] as i64, rom[rom.len - 3] as i64); }
     for i in 1048576 { mem[i] = 0; }
     for i in 256 { io_ports[i] = 0; }
-    bk_ram = 0xFF; bk_rom0 = 0xFF; bk_rom1 = 0xFF; bk_linear = 0;
+    bk_ram = 0xFF; bk_rom0 = 0xFF; bk_rom1 = 0xFF; bk_linear = 0xFF;
+    bk_ram_hi = 0xFF; bk_rom0_hi = 0xFF; bk_rom1_hi = 0xFF;
+    mapper_2003 = rom.len > 16 && (rom[rom.len - 3] as i64) == 1;
+    rom_span = 1; while rom_span < rom.len { rom_span *= 2; }
     int_cause = 0; key_select = 0; keys_state = 0; cpu_halted = false; sys_ctrl1 = 0x02;
     irq_inhibit = 0; trap_inhibit = 0; irq_ret_override = -1;
     ws_cycles = 0; last_line = 0; lfsr = 0; noise_acc = 0; last_tick = 0; init_cyc(); init_io_masks();
@@ -350,6 +380,7 @@ fn ws_frame() {
         else if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
         if !cpu_halted {
             let pre_cx: i64 = r[1] as i64;
+            dbg_ring[dbg_ring_pos] = ((seg[1] as i64) << 24) | ((ip as i64) << 8) | (rd8(phys(seg[1], ip)) as i64); dbg_ring_pos = (dbg_ring_pos + 1) & 63;
             fault_chg = 0; cyc_in_exec = true; irq_ret_override = -1;
             let okc: bool = exec_one(); cyc_in_exec = false;
             if !okc { ws_unsupported = true; return; }

@@ -48,7 +48,7 @@ fn init_cyc() {
     for i in 8 { cyc_tab[0xD8 + i] = 1; }
     cyc_tab[0xE4] = 7; cyc_tab[0xE5] = 7; cyc_tab[0xE6] = 7; cyc_tab[0xE7] = 7; cyc_tab[0xEC] = 5; cyc_tab[0xED] = 5; cyc_tab[0xEE] = 5; cyc_tab[0xEF] = 5;
     cyc_tab[0xE8] = 3; cyc_tab[0xE9] = 2; cyc_tab[0xEA] = 5; cyc_tab[0xEB] = 2;
-    cyc_tab[0xF1] = 1; cyc_tab[0xF4] = 12; cyc_tab[0xF5] = 4; cyc_tab[0xF6] = 5; cyc_tab[0xF7] = 5; cyc_tab[0xFE] = 3; cyc_tab[0xFF] = 5;
+    cyc_tab[0xF1] = 41; cyc_tab[0xF4] = 12; cyc_tab[0xF5] = 4; cyc_tab[0xF6] = 5; cyc_tab[0xF7] = 5; cyc_tab[0xFE] = 3; cyc_tab[0xFF] = 5;
     cyc_tab[0xF8] = 4; cyc_tab[0xF9] = 4; cyc_tab[0xFA] = 4; cyc_tab[0xFB] = 4; cyc_tab[0xFC] = 4; cyc_tab[0xFD] = 4;
 }
 
@@ -95,6 +95,7 @@ fn cyc_ff() -> i64 {
 fn cyc_fe() -> i64 {
     if d_reg == 0 || d_reg == 1 { if d_isreg { return 1; } return 3; }
     if d_reg == 6 { return 2; }
+    if d_reg >= 2 && d_reg <= 5 { return cyc_ff(); }  // the mirrored FF transfers
     return 1;
 }
 
@@ -136,7 +137,7 @@ fn est_cycles(pre_cx: i64) -> i64 {
     }
     else if op == 0xF6 || op == 0xF7 { c = cyc_f6f7(op) + ea_premium(op); }
     else if op == 0xFF { c = cyc_ff() + ea_premium(op); if d_reg >= 2 && d_reg <= 5 { sets_xfer = true; } }
-    else if op == 0xFE { c = cyc_fe() + ea_premium(op); }
+    else if op == 0xFE { c = cyc_fe() + ea_premium(op); if d_reg >= 2 && d_reg <= 5 { sets_xfer = true; } }
     else if op >= 0x70 && op <= 0x7F {
         if dbg_taken {
             sets_xfer = true;
@@ -182,7 +183,7 @@ var recording: bool = false;
 fn wb8(p: i64, v: u8) {
     if ws_mode {
         if p < 0x10000 { mem[p] = v; }
-        else if p < 0x20000 { sram[(((bk_ram << 16) | (p & 0xFFFF)) % 65536) as i64] = v; }
+        else if p < 0x20000 { sram[(((ram_bank() << 16) | (p & 0xFFFF)) % 65536) as i64] = v; }
         return;  // writes into the ROM windows are ignored
     }
     mem[p] = v; if recording { touched.push(p); }
@@ -365,7 +366,7 @@ var irq_ret_override: i64 = -1;
 
 fn do_int(n: i64) { do_int_at(n, ip as i64); }
 fn do_int_at(n: i64, ret_ip: i64) {
-    if cyc_in_exec && dbg_op != 0xCC && dbg_op != 0xCD { fault_chg = 44; fault_base = cyc_fault_base(); }  // fault/interrupt-entry charge for the cycle estimator (INT opcodes carry theirs in cyc_tab)
+    if cyc_in_exec && dbg_op != 0xCC && dbg_op != 0xCD && dbg_op != 0xF1 { fault_chg = 44; fault_base = cyc_fault_base(); }  // fault/interrupt-entry charge for the cycle estimator (INT opcodes carry theirs in cyc_tab)
     push16(flags as i64);
     push16(seg[1] as i64);
     push16(ret_ip);
@@ -679,6 +680,15 @@ fn op_bins_ext(op2: i64) {
 }
 
 // ---- Instruction slice ----
+// FF /2-/5 (and FE /2-/5 on the MZ): CALL / CALL far / JMP / JMP far
+// through a word operand; ModRM already decoded.
+fn ff_xfer() -> bool {
+    if d_reg == 2 { let t = read_rm(true); push16(ip as i64); ip = t as! u16; return true; }  // CALL Ev
+    if d_reg == 3 { if d_isreg && !cpu_mz { return false; } let nip: i64 = seg_rd16(d_segbase, d_off); let ncs: i64 = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); push16(seg[1] as i64); push16(ip as i64); ip = nip as! u16; seg[1] = ncs as! u16; return true; }  // CALL far Ev (mod=3 on the MZ reads at the adder EA)
+    if d_reg == 4 { ip = read_rm(true) as! u16; return true; }  // JMP Ev
+    if d_isreg && !cpu_mz { return false; } ip = seg_rd16(d_segbase, d_off); seg[1] = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); return true;  // JMP far Ev (mod=3 on the MZ reads at the adder EA)
+}
+
 fn exec_one() -> bool {
     seg_override = -1;
     rep_prefix = 0;
@@ -781,14 +791,11 @@ fn exec_one() -> bool {
     if op == 0x83 { decode_modrm(); let dst = read_rm(true); let b8 = fetch8(); let b8i: i64 = b8; let srcv: i64 = (if b8i > 127 { b8i - 256 } else { b8i }) & 0xFFFF; let res = alu_op(d_reg, dst, srcv, 16); if d_reg != 7 { write_rm(true, res); } return true; }
     if op >= 0x40 && op <= 0x47 { let i = op - 0x40; r[i] = do_incdec(r[i] as i64, false, 16) as! u16; return true; }  // INC r16
     if op >= 0x48 && op <= 0x4F { let i = op - 0x48; r[i] = do_incdec(r[i] as i64, true, 16) as! u16; return true; }  // DEC r16
-    if op == 0xFE { decode_modrm(); if d_reg == 0 { let v = read_rm(false); write_rm(false, do_incdec(v, false, 8)); return true; } if d_reg == 1 { let v = read_rm(false); write_rm(false, do_incdec(v, true, 8)); return true; } if d_reg == 6 { r[4] = r[4] - 2; let v = read_rm(true); seg_wr16((seg[2] as i64) << 4, r[4] as i64, v as! u16); return true; } if cpu_mz && d_reg == 7 { return true; } return false; }  // FE /6 = PUSH (word operand, SP first) as in the FF group; /7 is a NOP on the MZ
+    if op == 0xFE { decode_modrm(); if d_reg == 0 { let v = read_rm(false); write_rm(false, do_incdec(v, false, 8)); return true; } if d_reg == 1 { let v = read_rm(false); write_rm(false, do_incdec(v, true, 8)); return true; } if d_reg == 6 { r[4] = r[4] - 2; let v = read_rm(true); seg_wr16((seg[2] as i64) << 4, r[4] as i64, v as! u16); return true; } if cpu_mz && d_reg >= 2 && d_reg <= 5 { return ff_xfer(); } if cpu_mz && d_reg == 7 { return true; } return false; }  // FE /2-/5 mirror the FF group on the MZ (word operand; Swanium, Wizardry/SD Gundam); FE /6 = PUSH (word operand, SP first) as in the FF group; /7 is a NOP on the MZ
     if op == 0xFF { decode_modrm();
         if d_reg == 0 { let v = read_rm(true); write_rm(true, do_incdec(v, false, 16)); return true; }
         if d_reg == 1 { let v = read_rm(true); write_rm(true, do_incdec(v, true, 16)); return true; }
-        if d_reg == 2 { let t = read_rm(true); push16(ip as i64); ip = t as! u16; return true; }  // CALL Ev
-        if d_reg == 3 { if d_isreg && !cpu_mz { return false; } let nip: i64 = seg_rd16(d_segbase, d_off); let ncs: i64 = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); push16(seg[1] as i64); push16(ip as i64); ip = nip as! u16; seg[1] = ncs as! u16; return true; }  // CALL far Ev (mod=3 on the MZ reads at the adder EA)
-        if d_reg == 4 { ip = read_rm(true) as! u16; return true; }  // JMP Ev
-        if d_reg == 5 { if d_isreg && !cpu_mz { return false; } ip = seg_rd16(d_segbase, d_off); seg[1] = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); return true; }  // JMP far Ev (mod=3 on the MZ reads at the adder EA)
+        if d_reg >= 2 && d_reg <= 5 { return ff_xfer(); }
         if d_reg == 7 && cpu_mz { return true; }  // V30MZ: FF /7 is a NOP, not a PUSH (WSCpuTest)
         if d_reg == 6 || d_reg == 7 { r[4] = r[4] - 2; let v = read_rm(true); seg_wr16((seg[2] as i64) << 4, r[4] as i64, v as! u16); return true; }  // PUSH Ev (/7 aliases /6 except on the MZ; SP decremented before the operand is read)
         return false; }
@@ -908,6 +915,7 @@ fn exec_one() -> bool {
         return true;
     }
     if op == 0xCC { do_int(3); return true; }  // INT3
+    if op == 0xF1 && cpu_mz { do_int(1); return true; }  // V30MZ: one-byte INT 1 (Swanium; SD Gundam, Wizardry, Riviera)
     if op == 0xCD { let n = fetch8(); do_int(n as i64); return true; }  // INT imm8
     if op == 0xCE { if ((flags as i64 >> 11) & 1) == 1 { do_int(4); } return true; }  // INTO
 

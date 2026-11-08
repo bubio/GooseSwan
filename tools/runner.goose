@@ -223,7 +223,11 @@ fn run_mark(path: u8[:], spec: u8[:]) {
 // per frame), <out>.ppm, <out>.ram (WRAM 0x0000-0xFFFF) and <out>.pcm
 // (s16le stereo 24 kHz) — the formats of the Swanium-side probe, so the
 // two cores can be compared frame by frame.
+var trace_frames: i64 = 0;  // sst run: print the CPU state at the end of the last N frames (GS_TRACE=N)
+
 fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
+    var tv: u8[>..] = [];
+    if env("GS_TRACE", tv) { for k in tv.len { trace_frames = trace_frames * 10 + ((tv[k] as i64) - 48); } }
     guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
     if model == "mono" { model_forced = 0; } else if model == "color" { model_forced = 1; }
     ws_boot();
@@ -246,6 +250,8 @@ fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
         keys_state = keys;
         ws_frame();
         if ws_unsupported { print("unsupported opcode ", dbg_op, " at ", seg[1], ":", dbg_ip, " frame ", fr); break; }
+        if trace_frames > 0 && fr >= frames - trace_frames { print("frame ", fr, " end cs:ip=", seg[1], ":", ip, " sp=", r[4], " halted=", cpu_halted, " cause=", int_cause, " en=", io_ports[0xB2], " if=", (flags >> 9) & 1, " line=", (ws_cycles % 40704) / 256);
+            for k in 64 { let e: i64 = dbg_ring[(dbg_ring_pos + k) & 63]; print("  ", e >> 24, ":", (e >> 8) & 0xFFFF, " ", e & 0xFF); } }
         for k in aud_buf.len { let v: i64 = aud_buf[k]; pcm.push((v & 0xFF) as! u8); pcm.push(((v >> 8) & 0xFF) as! u8); }
         aud_buf = [];
         let line = str(fb_hash(), "\n");
