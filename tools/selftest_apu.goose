@@ -1,246 +1,8 @@
-// GooseSwan APU: noise LFSR, wave channels, sweep, mixer readback
-// ports, plus the apu_test self-test.
+// sst apu_test: white-box APU / DMA self-test.
+namespace core;
 
-var lfsr: i64 = 0;          // APU noise LFSR (15-bit, XNOR feedback), read back through ports 92/93
-var noise_acc: i64 = 0;     // cycles accumulated towards the next LFSR step
-fn step_lfsr() {
-    let mode: i64 = (io_ports[0x8E] as i64) & 7;
-    var tap: i64 = 14;
-    if mode == 1 { tap = 10; } else if mode == 2 { tap = 13; } else if mode == 3 { tap = 4; } else if mode == 4 { tap = 8; } else if mode == 5 { tap = 6; } else if mode == 6 { tap = 9; } else if mode == 7 { tap = 11; }
-    let fb: i64 = 1 ^ ((lfsr >> 7) & 1) ^ ((lfsr >> tap) & 1);
-    lfsr = ((lfsr << 1) | fb) & 0x7FFF;
-}
-fn noise_tick(dc: i64) {
-    if ((io_ports[0x8E] as i64) & 0x10) == 0 { return; }        // NOISE_ENABLE
-    if ((io_ports[0x90] as i64) & 0x88) != 0x88 { return; }     // channel 4 on + noise mode
-    let pitch: i64 = (io_ports[0x86] as i64) | (((io_ports[0x87] as i64) & 7) << 8);
-    let period: i64 = 2048 - pitch;
-    noise_acc += dc;
-    while noise_acc >= period { noise_acc -= period; step_lfsr(); }
-}
-
-// ---- PPU: background rendering (SCR1/SCR2 + windows, mono and colour) ----
-// Model follows Swanium's ppu module: the framebuffer holds one RGB444
-// value per pixel (224x144). Lines are rendered as they complete in
-// ws_line_events, from live ports/RAM. Sprites are not rendered yet.
-var ch_period: i64[4] = [0; 4];
-var ch_idx: i64[4] = [0; 4];
-var ch_sample: i64[4] = [0; 4];
-var sweep_ctr: i64 = 0;
-var sweep_step: i64 = 0;
-var fast_primed: bool = false;
-
-fn apu_pitch(ch: i64) -> i64 {
-    return ((io_ports[0x80 + ch * 2] as i64) | ((io_ports[0x81 + ch * 2] as i64) << 8)) & 0x7FF;
-}
-
-fn apu_read_wave(ch: i64) {
-    let base: i64 = ((io_ports[0x8F] as i64) << 6) + ch * 16;
-    let b: i64 = mem[base + (ch_idx[ch] >> 1)] as i64;
-    if (ch_idx[ch] & 1) == 0 { ch_sample[ch] = b & 0x0F; } else { ch_sample[ch] = (b >> 4) & 0x0F; }
-}
-
-fn apu_chan_advance(ch: i64, dc: i64) {
-    let period: i64 = 2048 - apu_pitch(ch);
-    var rem: i64 = dc;
-    var first: i64 = ch_period[ch]; if first == 0 { first = 1; }
-    if rem < first { ch_period[ch] -= rem; return; }
-    rem -= first;
-    ch_idx[ch] = (ch_idx[ch] + 1) & 0x1F;
-    apu_read_wave(ch);
-    if rem == 0 { ch_period[ch] = period; return; }
-    let extra: i64 = rem / period;
-    if extra != 0 { ch_idx[ch] = (ch_idx[ch] + extra) & 0x1F; apu_read_wave(ch); }
-    ch_period[ch] = period - (rem % period);
-}
-
-fn apu_sweep_apply() {
-    var delta: i64 = io_ports[0x8C] as i64; if delta >= 128 { delta -= 256; }
-    var np: i64 = apu_pitch(2) + delta;
-    if np > 2047 { np = 0; } else if np < 0 { np = 2047; }
-    io_ports[0x84] = (np & 0xFF) as! u8;
-    io_ports[0x85] = ((np >> 8) & 0xFF) as! u8;
-}
-
-fn apu_sweep_tick() {
-    if sweep_step > 0 { sweep_step -= 1; return; }
-    sweep_step = (io_ports[0x8D] as i64) & 0x1F;
-    apu_sweep_apply();
-}
-
-var sweep_prepaid: i64 = 0;
-
-fn sweep_advance(dc: i64) {
-    if dc <= 0 { return; }
-    let ctrl: i64 = io_ports[0x90] as i64;
-    if (ctrl & 0x40) == 0 || (ctrl & 0x04) == 0 { fast_primed = false; return; }
-    if ((io_ports[0x95] as i64) & 0x02) != 0 {
-        var ticks: i64 = dc;
-        if !fast_primed { fast_primed = true; ticks -= 1; }
-        var i: i64 = 0;
-        while i < ticks { apu_sweep_tick(); i += 1; }
-    } else {
-        sweep_ctr += dc;
-        while sweep_ctr > 8192 { sweep_ctr -= 8193; apu_sweep_tick(); }
-    }
-}
-
-fn apu_tick(dc: i64) {
-    if dc <= 0 { return; }
-    let ctrl: i64 = io_ports[0x90] as i64;
-    for ch in 4 { if (ctrl & (1 << ch)) != 0 { apu_chan_advance(ch, dc); } }
-    var sdc: i64 = dc - sweep_prepaid;
-    sweep_prepaid = 0;
-    if sdc > 0 { sweep_advance(sdc); }
-    if aud_enabled {
-        aud_acc += dc;
-        while aud_acc >= 128 { aud_acc -= 128; audio_emit(); }
-    }
-}
-
-// ---- Audio sample stream (M5): one stereo sample per 128 CPU
-// cycles (24 kHz), following Swanium's apu output model. mix_waves
-// sums sample x volume nibbles per side and scales by 32; the voice
-// channel contributes its low-passed level routed by port 0x94 and
-// scaled by 64; HyperVoice sums into the same domain; port 0x91
-// then selects stereo (bit 7) or the mono speaker sum with its
-// volume shift. Emission is gated by aud_enabled so the headless
-// test runners pay nothing; the frontend will drain aud_buf.
-var aud_enabled: bool = false;
-var aud_acc: i64 = 0;
-var aud_buf: i64[>..] = [];
-var voice_lp_prev: i64 = 0;
-var voice_level: i64 = 0;
-
-fn voice_feed(v: i64) {
-    if ((io_ports[0x90] as i64) & 0x20) != 0 {
-        let x: i64 = v - 0x80;
-        voice_level = (x + voice_lp_prev) / 2;
-        voice_lp_prev = x;
-    }
-}
-
-fn clamp16(v: i64) -> i64 { if v > 32767 { return 32767; } if v < -32768 { return -32768; } return v; }
-
-fn audio_emit() {
-    let ctrl: i64 = io_ports[0x90] as i64;
-    var wl: i64 = 0; var wr: i64 = 0;
-    for ch in 4 {
-        if (ctrl & (1 << ch)) == 0 { continue; }
-        if ch == 1 && (ctrl & 0x20) != 0 { continue; }
-        var s: i64 = ch_sample[ch];
-        if ch == 3 && (ctrl & 0x80) != 0 && ((io_ports[0x8E] as i64) & 0x10) != 0 && (ctrl & 0x88) == 0x88 { if (lfsr & 1) != 0 { s = 15; } else { s = 0; } }
-        let vol: i64 = io_ports[0x88 + ch] as i64;
-        wl += s * (vol >> 4); wr += s * (vol & 0x0F);
-    }
-    wl *= 32; wr *= 32;
-    var vl: i64 = 0; var vr: i64 = 0;
-    if (ctrl & 0x20) != 0 {
-        let vv: i64 = io_ports[0x94] as i64;
-        if (vv & 0x04) != 0 { vl = voice_level; } else if (vv & 0x08) != 0 { vl = voice_level >> 1; }
-        if (vv & 0x01) != 0 { vr = voice_level; } else if (vv & 0x02) != 0 { vr = voice_level >> 1; }
-        vl *= 64; vr *= 64;
-    } else { voice_lp_prev = 0; voice_level = 0; }
-    let hl, hr = hv_output();
-    var l: i64 = wl + vl + hl; var r: i64 = wr + vr + hr;
-    let oc: i64 = io_ports[0x91] as i64;
-    if (oc & 0x80) != 0 { l = clamp16(l); r = clamp16(r); }
-    else { let m: i64 = clamp16((l + r) >> ((oc >> 1) & 3)); l = m; r = m; }
-    aud_buf.push(l); aud_buf.push(r);
-}
-
-fn wav_write() {
-    var w: u8[>..] = [];
-    let data_bytes: i64 = aud_buf.len * 2;
-    let riff = "RIFF"; for i in riff.len { w.push(riff[i]); }
-    let chunk: i64 = 36 + data_bytes;
-    w.push((chunk & 0xFF) as! u8); w.push(((chunk >> 8) & 0xFF) as! u8); w.push(((chunk >> 16) & 0xFF) as! u8); w.push(((chunk >> 24) & 0xFF) as! u8);
-    let wave = "WAVE"; for i in wave.len { w.push(wave[i]); }
-    let fmt = "fmt "; for i in fmt.len { w.push(fmt[i]); }
-    w.push(16); w.push(0); w.push(0); w.push(0);
-    w.push(1); w.push(0); w.push(2); w.push(0);
-    w.push(0xC0); w.push(0x5D); w.push(0); w.push(0);
-    w.push(0x80); w.push(0xBB); w.push(0); w.push(0);
-    w.push(4); w.push(0); w.push(16); w.push(0);
-    let data = "data"; for i in data.len { w.push(data[i]); }
-    w.push((data_bytes & 0xFF) as! u8); w.push(((data_bytes >> 8) & 0xFF) as! u8); w.push(((data_bytes >> 16) & 0xFF) as! u8); w.push(((data_bytes >> 24) & 0xFF) as! u8);
-    for i in aud_buf.len { let v: i64 = aud_buf[i]; w.push((v & 0xFF) as! u8); w.push(((v >> 8) & 0xFF) as! u8); }
-    write_file("audio.wav", w);
-}
-
-// Port accesses land partway through an IN/OUT instruction, not at
-// its end: WSHWTest's fast-sweep CPU-cycle case pins the pitch write
-// to 2 cycles before the end of OUT imm8 (7 cycles, so 5 cycles run
-// before the write takes effect) and the pitch sample to 4 cycles
-// into IN imm8. port_rd/port_wr therefore pre-charge the sweep for
-// the cycles that elapse before the access, and apu_tick skips the
-// prepaid part of the next delta. Only the sweep is cycle-sensitive
-// at this granularity; channel phase and the noise LFSR are not
-// pre-charged (their test suites pass without it).
-
-fn apu_out_port(p: i64) -> i64 {
-    let ctrl: i64 = io_ports[0x90] as i64;
-    var left: i64 = 0;
-    var right: i64 = 0;
-    for ch in 4 {
-        if (ctrl & (1 << ch)) == 0 { continue; }
-        if ch == 1 && (ctrl & 0x20) != 0 { continue; }
-        var s: i64 = ch_sample[ch];
-        if ch == 3 && (ctrl & 0x80) != 0 && ((io_ports[0x8E] as i64) & 0x10) != 0 && (ctrl & 0x88) == 0x88 { if (lfsr & 1) != 0 { s = 15; } else { s = 0; } }
-        let vol: i64 = io_ports[0x88 + ch] as i64;
-        left += s * (vol >> 4);
-        right += s * (vol & 0x0F);
-    }
-    if (ctrl & 0x20) != 0 { let vv: i64 = io_ports[0x89] as i64; left += vv; right += vv; }
-    var v: i64 = left + right;
-    if (p & 0xFE) == 0x96 { v = right; }
-    if (p & 0xFE) == 0x98 { v = left; }
-    return (v >> ((p & 1) * 8)) & 0xFF;
-}
-
-// The serial TX-ready cause is a level, not a baud timer: with the
-// serial port enabled (SERIAL_CTRL bit 7) and the SERIAL_SEND
-// interrupt enabled, INT_CAUSE bit 0 reads as permanently pending
-// (the UART is always ready to send). It is re-evaluated on writes
-// to the serial data/enable/ctrl ports and cleared only via
-// INT_CAUSE_CLEAR, matching Swanium's refresh model — and it is
-// exactly what WSTimingTest's HLT and IRQ loops measure: their
-// handler never acknowledges, so the cause must simply stay up.
 var apu_pass: i64 = 0;
 var apu_fail: i64 = 0;
-
-// ---- HyperVoice (colour only): the 8-bit data latch (port 0x69) or
-// the signed 16-bit direct words (ports 0x64-0x67) as an extra PCM
-// source, following Swanium's apu model (after Mednafen). The sample
-// expansion is CPU-invisible today — the audible mix lands with the
-// M5 frontend — but the maths is pinned here by Swanium's own test
-// vectors in apu_test.
-fn hv_sample(ctrl: i64, data: i64) -> i64 {
-    let shift: i64 = ctrl & 3;
-    let mode: i64 = ctrl & 0x0C;
-    var expanded: i64 = 0;
-    if mode == 0 { expanded = data << (8 - shift); }
-    else if mode == 4 { expanded = (data - 256) << (8 - shift); }
-    else if mode == 8 { expanded = s8(data) << (8 - shift); }
-    else { expanded = data << 8; }
-    var t: i64 = expanded;
-    if t > 32767 { t -= 65536; }
-    if t < -32768 { t += 65536; }
-    return t >> 5;
-}
-
-fn hv_output() -> i64, i64 {
-    let ctrl: i64 = io_ports[0x6A] as i64;
-    if ws_mono_cart || !ppu_color_mode() || (ctrl & 0x80) == 0 { return 0, 0; }
-    let dl: i64 = s16((io_ports[0x64] as i64) | ((io_ports[0x65] as i64) << 8));
-    let dr: i64 = s16((io_ports[0x66] as i64) | ((io_ports[0x67] as i64) << 8));
-    if dl != 0 || dr != 0 { return dl, dr; }
-    let s: i64 = hv_sample(ctrl, io_ports[0x69] as i64) * 32;
-    let chan: i64 = io_ports[0x6B] as i64;
-    let l: i64 = if (chan & 0x40) != 0 { s } else { 0 };
-    let r: i64 = if (chan & 0x20) != 0 { s } else { 0 };
-    return l, r;
-}
 
 fn apu_check(name: u8[:], got: i64, exp: i64) {
     if got == exp { apu_pass += 1; } else { apu_fail += 1; print("APU FAIL ", name, ": got ", got, ", expected ", exp); }
@@ -358,7 +120,7 @@ fn apu_test() {
     apu_check("fast sweep meas2", port_rd(0x84) | (port_rd(0x85) << 8), 266);
     ws_mode = false;
     // Serial TX-ready level: latches when serial + its IRQ are on (mono carts)
-    ws_mono_cart = true;
+    model_mono = true;
     apu_reset_state();
     port_wr(0xB3, 0xC0);
     apu_check("serial no latch before enable", int_cause & 1, 0);
@@ -372,13 +134,13 @@ fn apu_test() {
     port_wr(0xB3, 0xC0);
     apu_check("serial latched by ctrl enable", int_cause & 1, 1);
     apu_check("serial ctrl mask", io_ports[0xB3] as i64, 0xC0);
-    ws_mono_cart = false;
+    model_mono = false;
     apu_reset_state();
     port_wr(0xB3, 0xC0);
     port_wr(0xB2, 0x01);
     apu_check("serial no latch on colour carts", int_cause & 1, 0);
     // Sound DMA (colour): cadence, writeback, decrement, repeat, hold
-    ws_mono_cart = false;
+    model_mono = false;
     apu_reset_state();
     mem[0x2000] = 0x11; mem[0x2001] = 0x22; mem[0x2002] = 0x33;
     port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x4C, 0x00);
@@ -429,13 +191,13 @@ fn apu_test() {
     port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x52, 0x83);
     sdma_tick(256);
     apu_check("sdma zero counter clears enable", (io_ports[0x52] as i64) & 0x80, 0);
-    ws_mono_cart = true;
+    model_mono = true;
     apu_reset_state();
     mem[0x2000] = 0x11;
     port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x4E, 0x01); port_wr(0x52, 0x83);
     sdma_tick(256);
     apu_check("sdma silent on mono carts", io_ports[0x89] as i64, 0);
-    ws_mono_cart = false;
+    model_mono = false;
     // HyperVoice port semantics and sample maths (Swanium's vectors)
     apu_reset_state();
     port_wr(0x64, 0xAA); port_wr(0x65, 0xBB);

@@ -2,12 +2,13 @@
 .goose/
 *.o
 /gooseswan
-/src/sst
-/src/gooseswan
+/tools/sst
+/app/gooseswan
 
 # Test data (large corpora and ROMs are fetched, not committed)
 tests/data/
 tests/data-v20/
+tests/roms/
 *.ws
 *.wsc
 
@@ -15,3 +16,6 @@ tests/data-v20/
 *.sav
 *.eep
 *.iep
+
+# Swanium differential probe build output
+tools/swprobe/target/

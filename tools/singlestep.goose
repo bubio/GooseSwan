@@ -1,21 +1,11 @@
-// GooseSwan: a WonderSwan emulator in Goose, developed TDD-style
-// against the SingleStepTests corpora and FluBBa's test ROMs.
-// This root file holds the SingleStepTests harness and main();
-// the machine itself lives in cpu.goose, bus.goose, ppu.goose
-// and apu.goose (plain file inclusion — one program, no
-// namespaces). Usage:
-//   sst <case-file.json> [more files...]   (add "v20" for the V20 corpus)
-//   sst ws <rom> [suite] [fb]
-//   sst ppu_test | apu_test
-import std;
-import os;
-import json;
-import cpu;
-import bus;
-import ppu;
-import apu;
+// SingleStepTests harness (sst <case-file.json>...): loads each JSON
+// case into the CPU's flat test bus, executes one instruction and
+// compares the final registers and RAM.
+namespace core;
 
-// ---- CPU state ----
+import json;
+
+// ---- Case state ----
 
 var c_init_regs: i64[14] = [0; 14];
 var c_init_present: bool[14] = [false; 14];
@@ -136,19 +126,4 @@ fn run_file(path: u8[:]) {
     };
     if !json::finish(rd) { print(path, ": JSON parse problem: ", json::message(rd)); }
     print(path, ": total=", total, " passed=", passed, " failed=", failed, " unsupported=", unsupported);
-}
-
-// Render the background map as text: the low byte of each map entry is the
-// character code (that is how test ROMs print), the BG scroll Y register
-// gives the first visible map row.
-fn main() {
-    let argv = args();
-    if argv.len < 2 { print("usage: sst [v20] <case-file.json> [more files...] | sst ws <rom.ws|wsc>"); exit(1); }
-    if argv[1] == "ws" { run_ws(argv[2]); return; }
-    if argv[1] == "ppu_test" { ppu_test(); return; }
-    if argv[1] == "apu_test" { apu_test(); return; }
-    if argv[1] == "eeprom_test" { eeprom_test(); return; }
-    var start: i64 = 1;
-    if argv[1] == "v20" { cpu_v20 = true; start = 2; }
-    for i in start..argv.len { run_file(argv[i]); }
 }

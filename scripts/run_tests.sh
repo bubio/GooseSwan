@@ -4,10 +4,10 @@
 # the full WSTimingTest harvest (400 passed / 7 failed is the
 # fitted baseline; the 7 are the documented deferred set).
 # Expects the corpus (scripts/fetch_corpus.sh) and the test ROMs
-# (scripts/fetch_test_roms.sh) to be in place, and src/sst built.
+# (scripts/fetch_test_roms.sh) to be in place, and tools/sst built.
 set -e
 cd "$(dirname "$0")/.."
-SST=./src/sst
+SST=./tools/sst
 for t in ppu_test apu_test eeprom_test; do
     out=$($SST $t)
     echo "$out"

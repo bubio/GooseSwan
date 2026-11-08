@@ -8,13 +8,17 @@ on:
   push:
     branches: [main]
     paths:
-      - "src/**"
+      - "core/**"
+      - "app/**"
+      - "tools/**"
       - "tests/**"
       - "scripts/**"
       - ".github/workflows/build-linux.yml"
   pull_request:
     paths:
-      - "src/**"
+      - "core/**"
+      - "app/**"
+      - "tools/**"
       - "tests/**"
       - "scripts/**"
       - ".github/workflows/build-linux.yml"
@@ -82,13 +86,13 @@ jobs:
         env:
           GOOSE_GFX_HEADLESS: "1"
           SDL_AUDIODRIVER: dummy
-        run: ./src/gooseswan tests/roms/WSHWTest.wsc 300 check
+        run: ./app/gooseswan tests/roms/WSHWTest.wsc 300 check
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: gooseswan-linux-amd64
-          path: src/gooseswan
+          path: app/gooseswan
           if-no-files-found: error
 
   publish-release:

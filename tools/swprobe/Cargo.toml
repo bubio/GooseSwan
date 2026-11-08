@@ -1,0 +1,10 @@
+[package]
+name = "swprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+swanium-core = { path = "../../../Swanium/crates/core" }
+
+[profile.release]
+debug = false

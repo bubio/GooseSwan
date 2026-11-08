@@ -14,10 +14,13 @@ Rust (cpu / ppu / apu / bus under `crates/core`).
 
 ## Status
 
-M1–M4 complete; M5 (frontend) in progress — see [ROADMAP.md](ROADMAP.md).
-The core passes the SingleStepTests corpora at their fitted baselines,
-WSCpuTest Test All, WSHWTest Test All and 400/407 WSTimingTest timing
-cases. Session notes live in [docs/sessions](docs/sessions).
+M1–M4 complete; M5 (frontend) and M6 (Swanium parity) in progress — see
+[ROADMAP.md](ROADMAP.md). The core passes the SingleStepTests corpora at
+their fitted baselines, WSCpuTest Test All, WSHWTest Test All, 400/407
+WSTimingTest timing cases and all 22 ws-test-suite pass/fail ROMs
+(`tests/ws_test_suite.sh`, opt-in). `tools/diff_swanium.py` compares it
+frame by frame with [Swanium](https://github.com/bubio/Swanium) when a
+sibling checkout is present. Session notes live in [docs/sessions](docs/sessions).
 
 CI (GitHub Actions, modelled on the author's BubiBoyLite setup) builds
 and runs the full battery on every push to main for Linux and macOS;
@@ -28,24 +31,33 @@ publishing a GitHub Release attaches `gooseswan-<platform>-<arch>.zip`
 
 The test harness (also the headless ROM runner):
 
-    goose build src/sst.goose          # -> src/sst
-    ./src/sst ws <rom> [suite] [fb|wav|fbwav]
+    goose build tools/sst.goose        # -> tools/sst
+    ./tools/sst ws <rom> [suite] [fb|wav|fbwav]
 
 The frontend (SDL3 window via Goose's gfx package, keyboard input,
 audio out):
 
-    goose build src/gooseswan.goose    # -> src/gooseswan
-    ./src/gooseswan <rom>
+    goose build app/gooseswan.goose    # -> app/gooseswan
+    ./app/gooseswan <rom>
 
 Keys: Y pad = WASD, X pad = arrow keys, A = X, B = Z, Start = Return,
 Escape closes. Save data lands next to the ROM (`<rom>.sav`,
-`<rom>.eep`, `<rom>.iep`). `./src/gooseswan <rom> <frames> check`
+`<rom>.eep`, `<rom>.iep`). `./app/gooseswan <rom> <frames> check`
 runs a fixed number of frames and verifies the presented picture
 against the emulated framebuffer (headless-friendly).
 
+`sh scripts/build_macos.sh --test` (or `build_linux.sh`) runs the core
+purity check, both builds and the full regression battery.
+
 ## Layout
 
-- `src/` — emulator core (cpu / bus / ppu / apu), the `sst` harness
-  and the `gooseswan` frontend (Goose)
-- `tests/` — test data fetch scripts and the framebuffer hash battery
+- `core/` — the emulator core as a Goose package (`namespace core`):
+  cpu / bus / eeprom / ppu / apu, with the public API in
+  `core/core.goose`. It imports nothing but std and does no host I/O;
+  `scripts/check_core.sh` typechecks it on its own to keep it that way.
+- `app/` — the frontend (window, input, audio device, save files),
+  using only the core API
+- `tools/` — the `sst` test harness: SingleStepTests runner, headless
+  ROM runner and white-box core self-tests
+- `tests/`, `scripts/` — test data fetch, regression battery, CI builds
 - `docs/` — research notes, decisions and session logs
