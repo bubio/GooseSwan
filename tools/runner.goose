@@ -144,3 +144,57 @@ fn wav_write() {
     for i in aud_buf.len { let v: i64 = aud_buf[i]; w.push((v & 0xFF) as! u8); w.push(((v >> 8) & 0xFF) as! u8); }
     write_file("audio.wav", w);
 }
+
+// ---- ws-test-suite pass/fail markers (sst mark <rom> <spec>) ----
+// asiekierka/ws-test-suite's common/test/pass_fail.h writes tile 5
+// (pass) or 6 (fail) into screen_1 (WRAM 0x1800, 64-byte rows) at
+// x = 27 - offset. spec lists the markers as "row:offset" pairs; a
+// leading "R" means each pair is a range (offsets max..0 on that row),
+// "P" that each pair is one position — the same tables Swanium's
+// public_roms.rs keeps per ROM. Runs at most 120 frames, stopping as
+// soon as every marker is written.
+fn mark_parse(spec: const u8[:], out: i64[>..]&) {
+    let ranges: bool = spec.len > 0 && spec[0] == 82;  // 'R'
+    var i: i64 = 1;
+    while i < spec.len {
+        var row: i64 = 0; var off: i64 = 0;
+        while i < spec.len && spec[i] != 58 { row = row * 10 + ((spec[i] as i64) - 48); i += 1; }
+        i += 1;
+        while i < spec.len && spec[i] != 44 { off = off * 10 + ((spec[i] as i64) - 48); i += 1; }
+        i += 1;
+        if ranges { var o: i64 = off; while o >= 0 { out.push(row); out.push(o); o -= 1; } }
+        else { out.push(row); out.push(off); }
+    }
+}
+
+fn run_mark(path: u8[:], spec: u8[:]) {
+    guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
+    ws_boot();
+    var pos: i64[>..] = [];
+    mark_parse(spec, pos);
+    let n: i64 = pos.len / 2;
+    var got: i64[>..] = [];
+    for k in n { got.push(0); }
+    var frame: i64 = 0;
+    var all: bool = false;
+    while frame < 120 && !all {
+        keys_state = 0;
+        ws_frame();
+        if ws_unsupported { print("FAIL unsupported opcode ", dbg_op, " at ", seg[1], ":", dbg_ip); exit(1); }
+        all = true;
+        for k in n {
+            let v: i64 = mem[0x1800 + pos[k * 2] * 64 + (27 - pos[k * 2 + 1]) * 2] as i64;
+            got[k] = v;
+            if v != 5 && v != 6 { all = false; }
+        }
+        frame += 1;
+    }
+    var pass: i64 = 0; var fail: i64 = 0;
+    for k in n { if got[k] == 5 { pass += 1; } else if got[k] == 6 { fail += 1; } }
+    if pass == n { print("PASS ", pass, "/", n, " (frame ", frame, ")"); return; }
+    print("FAIL ", pass, "/", n, " pass, ", fail, " fail, ", n - pass - fail, " unwritten (frame ", frame, ")");
+    for k in n { if got[k] != 5 { print("  row ", pos[k * 2], " offset ", pos[k * 2 + 1], ": tile ", got[k]); } }
+    var screen: u8[1024] = [0; 1024];
+    let m = ws_screen_text(screen);
+    write_stdout(screen[..m]);
+}

@@ -1,6 +1,7 @@
 // GooseSwan test harness. Usage:
 //   sst [v20] <case-file.json> [more files...]   SingleStepTests corpora
 //   sst ws <rom> [suite] [fb|wav|fbwav]          headless ROM runner
+//   sst mark <rom> <R|P>row:off,...             ws-test-suite pass/fail markers
 //   sst ppu_test | apu_test | eeprom_test        core self-tests
 // Everything but main() lives in the files imported below; they are
 // white-box tests in the core's own namespace.
@@ -17,6 +18,7 @@ fn main() {
     let argv = args();
     if argv.len < 2 { print("usage: sst [v20] <case-file.json> [more files...] | sst ws <rom.ws|wsc> | sst ppu_test|apu_test|eeprom_test"); exit(1); }
     if argv[1] == "ws" { core::run_ws(argv[2]); return; }
+    if argv[1] == "mark" && argv.len > 3 { core::run_mark(argv[2], argv[3]); return; }
     if argv[1] == "ppu_test" { core::ppu_test(); return; }
     if argv[1] == "apu_test" { core::apu_test(); return; }
     if argv[1] == "eeprom_test" { core::eeprom_test(); return; }
