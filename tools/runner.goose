@@ -126,7 +126,7 @@ fn count_ok(buf: u8[:], n: i64) -> i64 {
 
 fn fb_hash() -> i64 {
     var h: i64 = 5381;
-    for i in 32256 { h = ((h << 5) + h) ^ (fb[i] as i64); }
+    for i in 32256 { h = ((h << 5) + h) ^ fb[i]; }
     return h;
 }
 
@@ -135,7 +135,7 @@ fn fb_write_ppm() {
     let hdr = "P6\n224 144\n255\n";
     for i in hdr.len { ppm.push(hdr[i]); }
     for i in 32256 {
-        let c: i64 = fb[i] as i64;
+        let c: i64 = fb[i];
         ppm.push((((c >> 8) & 15) * 17) as! u8);
         ppm.push((((c >> 4) & 15) * 17) as! u8);
         ppm.push(((c & 15) * 17) as! u8);
@@ -201,7 +201,7 @@ fn run_mark(path: u8[:], spec: u8[:]) {
         if ws_unsupported { print("FAIL unsupported opcode ", dbg_op, " at ", seg[1], ":", dbg_ip); exit(1); }
         all = true;
         for k in n {
-            let v: i64 = mem[0x1800 + pos[k * 2] * 64 + (27 - pos[k * 2 + 1]) * 2] as i64;
+            let v: i64 = mem[0x1800 + pos[k * 2] * 64 + (27 - pos[k * 2 + 1]) * 2];
             got[k] = v;
             if v != 5 && v != 6 { all = false; }
         }
@@ -274,7 +274,7 @@ fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
     var ppm: u8[>..] = [];
     let hdr = "P6\n224 144\n255\n";
     for k in hdr.len { ppm.push(hdr[k]); }
-    for k in 32256 { let c: i64 = fb[k] as i64; ppm.push((((c >> 8) & 15) * 17) as! u8); ppm.push((((c >> 4) & 15) * 17) as! u8); ppm.push(((c & 15) * 17) as! u8); }
+    for k in 32256 { let c: i64 = fb[k]; ppm.push((((c >> 8) & 15) * 17) as! u8); ppm.push((((c >> 4) & 15) * 17) as! u8); ppm.push(((c & 15) * 17) as! u8); }
     write_file(str(out, ".ppm"), ppm);
     var screen: u8[1024] = [0; 1024];
     let m = ws_screen_text(screen);

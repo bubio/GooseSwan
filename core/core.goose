@@ -68,12 +68,12 @@ fn run_frame(keys: i64) -> bool {
     return !ws_unsupported;
 }
 fn fault_op() -> i64 { dbg_op }
-fn fault_cs() -> i64 { seg[1] as i64 }
+fn fault_cs() -> i64 { seg[1] }
 fn fault_ip() -> i64 { dbg_ip }
 
 // The framebuffer is core::fb: SCREEN_W x SCREEN_H RGB444 values
 // (0x0RGB), row-major, complete after every run_frame.
-fn pixel(x: i64, y: i64) -> i64 { fb[y * SCREEN_W + x] as i64 }
+fn pixel(x: i64, y: i64) -> i64 { fb[y * SCREEN_W + x] }
 
 // Audio: off by default (headless runs pay nothing). When on, each
 // run_frame appends interleaved stereo i16-range samples at
@@ -106,7 +106,7 @@ fn save_load(kind: i64, data: const u8[:]) {
     for i in n {
         if kind == SAVE_SRAM { sram[i] = data[i]; }
         else if kind == SAVE_CART_EEPROM { ee_data[i] = data[i]; }
-        else if kind == SAVE_RTC { rtc_reg[i] = if i == 3 { (data[i] as i64) & 7 } else { data[i] as i64 }; }
+        else if kind == SAVE_RTC { rtc_reg[i] = if i == 3 { (data[i] as i64) & 7 } else { data[i] }; }
         else { ee_data[2048 + i] = data[i]; }
     }
 }

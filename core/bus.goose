@@ -94,7 +94,7 @@ fn port_rd(p: i64) -> i64 {
     if p == 0xBA { return ee_output[1] & 0xFF; }  // IEEPROM data: the READ output latch, not the input shadow
     if p == 0xBB { return (ee_output[1] >> 8) & 0xFF; }
     if p == 0xBE { return ie_status_read(); }  // IEEPROM status: ready | done | protect fault (reading polls the read delay)
-    if p >= 0xC4 && p <= 0xC7 { if cart_eeprom { return io_ports[p] as i64; } return 0xFF; }  // cart EEPROM latches, else open bus
+    if p >= 0xC4 && p <= 0xC7 { if cart_eeprom { return io_ports[p]; } return 0xFF; }  // cart EEPROM latches, else open bus
     if p == 0xC8 { if cart_eeprom { return 0x02 | ((io_ports[0xC8] as i64) & 1); } return 0xFF; }  // cart EEPROM status: ready | DONE
     if p == 0x52 && ppu_color_mode() { return (io_ports[0x52] as i64) & 0xDF; }  // SDMA_CTRL: ENABLE reads live (it self-clears on a zero length / at the end), bit 5 does not exist
     if p == 0xCA { return if rtc_present { rtc_read_command() } else { 0x90 }; }  // cartridge RTC command/status, open bus when absent
@@ -108,9 +108,9 @@ fn port_rd(p: i64) -> i64 {
     if p == 0xC1 { return bk_ram; }
     if p == 0xC2 { return bk_rom0; }
     if p == 0xC3 { return bk_rom1; }
-    if p >= 0xB8 { return io_ports[p] as i64; }
-    if ppu_color_mode() { return ((io_ports[p] as i64) & io_wmask_c[p]) | io_always_c[p]; }  // colour mode (colour model + SYSTEM_CTRL2 bit 7) selects the mask set
-    return ((io_ports[p] as i64) & io_wmask_m[p]) | io_always_m[p];
+    if p >= 0xB8 { return io_ports[p]; }
+    if ppu_color_mode() { return (io_ports[p] & io_wmask_c[p]) | io_always_c[p]; }  // colour mode (colour model + SYSTEM_CTRL2 bit 7) selects the mask set
+    return (io_ports[p] & io_wmask_m[p]) | io_always_m[p];
 }
 fn hexval(c: i64) -> i64 {
     if c >= 48 && c <= 57 { return c - 48; }
@@ -136,7 +136,7 @@ var dbg_pwatch_val: i64 = 0;
 
 fn port_wr(p: i64, v: i64) {
     if p == dbg_pwatch { dbg_pwatch_hits += 1; dbg_pwatch_last = ((seg[1] as i64) << 16) | dbg_ip; dbg_pwatch_val = v; }
-    if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE6 || dbg_op == 0xE7 || dbg_op == 0xEE || dbg_op == 0xEF) { let pre: i64 = est_cycles(r[1] as i64) - (if dbg_op == 0xE7 || dbg_op == 0xEF { 1 } else { 2 }); if pre > 0 { sweep_advance(pre); sweep_prepaid += pre; } }  // OUT: sweep runs until the write lands (once per instruction)
+    if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE6 || dbg_op == 0xE7 || dbg_op == 0xEE || dbg_op == 0xEF) { let pre: i64 = est_cycles(r[1]) - (if dbg_op == 0xE7 || dbg_op == 0xEF { 1 } else { 2 }); if pre > 0 { sweep_advance(pre); sweep_prepaid += pre; } }  // OUT: sweep runs until the write lands (once per instruction)
     if p >= 0xA8 && p <= 0xAB { return; }  // HBL/VBL timer counters are read-only
     io_ports[p] = v as! u8;
     if p == 0xA4 { io_ports[0xA8] = v as! u8; }        // writing a timer period also resets its counter (per byte)
@@ -171,30 +171,30 @@ fn port_wr(p: i64, v: i64) {
     else if p == 0xC3 { bk_rom1 = v; }
 }
 
-fn hbl_count() -> i64 { (io_ports[0xA8] as i64) | ((io_ports[0xA9] as i64) << 8) }
+fn hbl_count() -> i64 { io_ports[0xA8] | ((io_ports[0xA9] as i64) << 8) }
 fn set_hbl_count(v: i64) { io_ports[0xA8] = (v & 0xFF) as! u8; io_ports[0xA9] = ((v >> 8) & 0xFF) as! u8; }
-fn vbl_count() -> i64 { (io_ports[0xAA] as i64) | ((io_ports[0xAB] as i64) << 8) }
+fn vbl_count() -> i64 { io_ports[0xAA] | ((io_ports[0xAB] as i64) << 8) }
 fn set_vbl_count(v: i64) { io_ports[0xAA] = (v & 0xFF) as! u8; io_ports[0xAB] = ((v >> 8) & 0xFF) as! u8; }
 fn tick_hbl() {
     let cnt: i64 = hbl_count();
     if cnt == 0 { return; }
-    let ctrl: i64 = io_ports[0xA2] as i64;
+    let ctrl: i64 = io_ports[0xA2];
     let irqen: bool = ((io_ports[0xB2] as i64) & 0x80) != 0;
     if (ctrl & 1) == 0 && !(cnt == 1 && irqen) { return; }  // disabled, except the counter=1 latch quirk (Swanium)
     if cnt == 1 {
         if irqen { int_cause |= 0x80; }
-        if (ctrl & 2) != 0 { set_hbl_count((io_ports[0xA4] as i64) | ((io_ports[0xA5] as i64) << 8)); } else { set_hbl_count(0); }
+        if (ctrl & 2) != 0 { set_hbl_count(io_ports[0xA4] | ((io_ports[0xA5] as i64) << 8)); } else { set_hbl_count(0); }
     } else { set_hbl_count(cnt - 1); }
 }
 fn tick_vbl() {
     int_cause |= 0x40 & (io_ports[0xB2] as i64);  // VBLANK_START latches into INT_CAUSE only when enabled (WSHWTest verifies this)
-    let ctrl: i64 = io_ports[0xA2] as i64;
+    let ctrl: i64 = io_ports[0xA2];
     if (ctrl & 4) == 0 { return; }
     let cnt: i64 = vbl_count();
     if cnt == 0 { return; }
     if cnt == 1 {
         if ((io_ports[0xB2] as i64) & 0x20) != 0 { int_cause |= 0x20; }
-        if (ctrl & 8) != 0 { set_vbl_count((io_ports[0xA6] as i64) | ((io_ports[0xA7] as i64) << 8)); } else { set_vbl_count(0); }
+        if (ctrl & 8) != 0 { set_vbl_count(io_ports[0xA6] | ((io_ports[0xA7] as i64) << 8)); } else { set_vbl_count(0); }
     } else { set_vbl_count(cnt - 1); }
 }
 
@@ -217,9 +217,9 @@ fn refresh_serial() {
 var gdma_stall: i64 = 0;
 
 fn run_gdma() {
-    var src: i64 = (((io_ports[0x42] as i64) & 0x0F) << 16) | ((io_ports[0x40] as i64) | ((io_ports[0x41] as i64) << 8));
-    var dst: i64 = (io_ports[0x44] as i64) | ((io_ports[0x45] as i64) << 8);
-    var len: i64 = (io_ports[0x46] as i64) | ((io_ports[0x47] as i64) << 8);
+    var src: i64 = (((io_ports[0x42] as i64) & 0x0F) << 16) | (io_ports[0x40] | ((io_ports[0x41] as i64) << 8));
+    var dst: i64 = io_ports[0x44] | ((io_ports[0x45] as i64) << 8);
+    var len: i64 = io_ports[0x46] | ((io_ports[0x47] as i64) << 8);
     let dec: bool = ((io_ports[0x48] as i64) & 0x40) != 0;
     var moved: i64 = 0;
     while len > 0 {
@@ -255,8 +255,8 @@ var sdma_counter: i64 = 0;
 var sdma_source_shadow: i64 = 0;
 var sdma_counter_shadow: i64 = 0;
 
-fn sdma_source_from_ports() -> i64 { (((io_ports[0x4C] as i64) & 0x0F) << 16) | (io_ports[0x4A] as i64) | ((io_ports[0x4B] as i64) << 8) }
-fn sdma_counter_from_ports() -> i64 { (((io_ports[0x50] as i64) & 0x0F) << 16) | (io_ports[0x4E] as i64) | ((io_ports[0x4F] as i64) << 8) }
+fn sdma_source_from_ports() -> i64 { (((io_ports[0x4C] as i64) & 0x0F) << 16) | io_ports[0x4A] | ((io_ports[0x4B] as i64) << 8) }
+fn sdma_counter_from_ports() -> i64 { (((io_ports[0x50] as i64) & 0x0F) << 16) | io_ports[0x4E] | ((io_ports[0x4F] as i64) << 8) }
 
 fn sdma_writeback() {
     io_ports[0x4A] = (sdma_source & 0xFF) as! u8; io_ports[0x4B] = ((sdma_source >> 8) & 0xFF) as! u8; io_ports[0x4C] = ((sdma_source >> 16) & 0x0F) as! u8;
@@ -264,7 +264,7 @@ fn sdma_writeback() {
 }
 
 fn sdma_step() {
-    let ctrl: i64 = io_ports[0x52] as i64;
+    let ctrl: i64 = io_ports[0x52];
     if (ctrl & 0x04) != 0 { io_ports[0x89] = 0; voice_feed(0); return; }  // HOLD: latch silence, pointers stay
     let sb: i64 = rd8(sdma_source);
     io_ports[0x89] = sb as! u8; voice_feed(sb);
@@ -312,7 +312,7 @@ fn ws_line_events() {
         last_line += 1; if last_line >= 159 { last_line = 0; }
         tick_hbl();
         if last_line == 144 { tick_vbl(); }
-        if last_line == (io_ports[0x03] as i64) && last_line < 159 { int_cause |= 0x10 & (io_ports[0xB2] as i64); }
+        if last_line == io_ports[0x03] && last_line < 159 { int_cause |= 0x10 & (io_ports[0xB2] as i64); }
         var completed: i64 = last_line - 1; if completed < 0 { completed += 159; }
         if completed == 142 { ppu_capture_sprites(true); }
         if completed < 144 { render_line(completed); }
@@ -331,7 +331,7 @@ fn ws_deliver_int() -> bool {
     if (flags & 0x0200) == 0 { return false; }
     var bit: i64 = 7;
     while bit > 0 && ((pending >> bit) & 1) == 0 { bit -= 1; }
-    let ret: i64 = if irq_ret_override >= 0 { irq_ret_override } else { ip as i64 };
+    let ret: i64 = if irq_ret_override >= 0 { irq_ret_override } else { ip };
     irq_ret_override = -1;
     do_int_at(((io_ports[0xB0] as i64) & 0xF8) + bit, ret);
     return true;
@@ -356,9 +356,9 @@ fn ws_boot() {
     cpu_mz = true;
     if rom.len > 16 { model_mono = (rom[rom.len - 9] as i64) == 0; }
     if model_forced >= 0 { model_mono = model_forced == 0; }
-    sram_size = if rom.len > 16 { sram_size_from_code(rom[rom.len - 5] as i64) } else { 0 };
+    sram_size = if rom.len > 16 { sram_size_from_code(rom[rom.len - 5]) } else { 0 };
     for i in 524288 { sram[i] = 0; }
-    if rom.len > 16 { ee_init_cart(rom[rom.len - 5] as i64); rtc_power_on(rom[rom.len - 4] as i64, rom[rom.len - 3] as i64); }
+    if rom.len > 16 { ee_init_cart(rom[rom.len - 5]); rtc_power_on(rom[rom.len - 4], rom[rom.len - 3]); }
     for i in 1048576 { mem[i] = 0; }
     for i in 256 { io_ports[i] = 0; }
     bk_ram = 0xFF; bk_rom0 = 0xFF; bk_rom1 = 0xFF; bk_linear = 0xFF;
@@ -393,11 +393,11 @@ fn ws_frame() {
         // instruction), one instruction, then the TF trap for it.
         let inhibited: bool = irq_inhibit > 0;
         if inhibited { irq_inhibit -= 1; }
-        if inhibited { if (int_cause & (io_ports[0xB2] as i64)) != 0 { cpu_halted = false; } }
+        if inhibited { if (int_cause & io_ports[0xB2]) != 0 { cpu_halted = false; } }
         else if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
         if !cpu_halted {
-            let pre_cx: i64 = r[1] as i64;
-            dbg_ring[dbg_ring_pos] = ((seg[1] as i64) << 24) | ((ip as i64) << 8) | (rd8(phys(seg[1], ip)) as i64); dbg_ring_pos = (dbg_ring_pos + 1) & 1023;
+            let pre_cx: i64 = r[1];
+            dbg_ring[dbg_ring_pos] = ((seg[1] as i64) << 24) | ((ip as i64) << 8) | (rd8(phys(seg[1], ip))); dbg_ring_pos = (dbg_ring_pos + 1) & 1023;
             fault_chg = 0; cyc_in_exec = true; irq_ret_override = -1;
             let okc: bool = exec_one(); cyc_in_exec = false;
             if !okc { ws_unsupported = true; return; }

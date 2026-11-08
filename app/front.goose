@@ -34,7 +34,7 @@ var front_audio_ok: bool = false;
 
 fn front_parse(s: const u8[:]) -> i64 {
     var v: i64 = 0;
-    for i in s.len { let c: i64 = s[i] as i64; if c >= 48 && c <= 57 { v = v * 10 + (c - 48); } }
+    for i in s.len { let c: i64 = s[i]; if c >= 48 && c <= 57 { v = v * 10 + (c - 48); } }
     return v;
 }
 
@@ -66,7 +66,7 @@ fn front_audio_pump() {
     front_snd = copy(ns); front_vox = copy(nv);
     if !front_audio_ok { core::audio_clear(); return; }
     var pcm: f32[>..] = [];
-    for i in core::audio_len() { pcm.push((core::audio_sample(i) as f32) / 32768.0); }
+    for i in core::audio_len() { pcm.push((core::audio_sample(i)) / 32768.0); }
     core::audio_clear();
     if pcm.len == 0 { return; }
     let snd = audio::create_sound(pcm, core::AUDIO_RATE as! i32, 2);
@@ -96,7 +96,7 @@ fn front_main() {
     front_audio_ok = audio::open(48000);
     if !front_audio_ok { print("audio: ", audio::error(), " (continuing silently)"); }
     var rgba: u8[129024] = [0; 129024];
-    let period: f64 = (core::FRAME_CYCLES as f64) / (core::CPU_HZ as f64);
+    let period: f64 = (core::FRAME_CYCLES as f64) / core::CPU_HZ;
     var next_t: f64 = gfx::time() + period;
     var frame_no: i64 = 0;
     var running: bool = true;
@@ -104,7 +104,7 @@ fn front_main() {
         if gfx::key_pressed("Escape") { running = false; }
         if !core::run_frame(front_keys()) { print("unsupported opcode ", core::fault_op(), " at cs:ip ", core::fault_cs(), ":", core::fault_ip()); running = false; }
         for i in 32256 {
-            let c: i64 = core::fb[i] as i64;
+            let c: i64 = core::fb[i];
             rgba[i * 4] = (((c >> 8) & 15) * 17) as! u8;
             rgba[i * 4 + 1] = (((c >> 4) & 15) * 17) as! u8;
             rgba[i * 4 + 2] = ((c & 15) * 17) as! u8;
