@@ -4,8 +4,8 @@
 # its own modules and std, and do no host I/O (files, stdout, process).
 set -e
 cd "$(dirname "$0")/.."
-goose check core/core.goose > /dev/null
-bad=$(grep -nE '^import ' core/*.goose | grep -vE 'import (std|cpu|bus|eeprom|ppu|apu);' || true)
+out=$(goose check core/core.goose 2>&1) || { echo "$out" >&2; exit 1; }
+bad=$(grep -nE '^import ' core/*.goose | grep -vE 'import (std|cpu|bus|eeprom|rtc|ppu|apu);' || true)
 io=$(grep -nE '\b(print|read_file|write_file|write_stdout|exit|args)\(' core/*.goose || true)
 if [ -n "$bad$io" ]; then
     echo "core purity check failed:" >&2

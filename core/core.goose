@@ -15,6 +15,7 @@ import cpu;
 import bus;
 import eeprom;
 import ppu;
+import rtc;
 import apu;
 
 let SCREEN_W: i64 = 224;
@@ -40,6 +41,8 @@ let KEY_B: i64 = 1 << 11;
 let SAVE_SRAM: i64 = 0;
 let SAVE_CART_EEPROM: i64 = 1;
 let SAVE_INTERNAL_EEPROM: i64 = 2;
+let SAVE_RTC: i64 = 3;                  // the cartridge clock's 10 registers
+let SAVE_KINDS: i64 = 4;
 
 // Hardware model for the next power_on: MODEL_AUTO follows the cartridge
 // footer's colour flag (mono carts run on a mono WonderSwan).
@@ -85,6 +88,7 @@ fn save_size(kind: i64) -> i64 {
     if kind == SAVE_SRAM { return 65536; }
     if kind == SAVE_CART_EEPROM { return if cart_eeprom { ee_size[0] } else { 0 }; }
     if kind == SAVE_INTERNAL_EEPROM { return 2048; }
+    if kind == SAVE_RTC { return if rtc_present { 10 } else { 0 }; }
     return 0;
 }
 fn save_read(kind: i64, out: u8[>..]&) {
@@ -92,6 +96,7 @@ fn save_read(kind: i64, out: u8[>..]&) {
     for i in n {
         if kind == SAVE_SRAM { out.push(sram[i]); }
         else if kind == SAVE_CART_EEPROM { out.push(ee_data[i]); }
+        else if kind == SAVE_RTC { out.push(rtc_reg[i] as! u8); }
         else { out.push(ee_data[2048 + i]); }
     }
 }
@@ -101,6 +106,14 @@ fn save_load(kind: i64, data: const u8[:]) {
     for i in n {
         if kind == SAVE_SRAM { sram[i] = data[i]; }
         else if kind == SAVE_CART_EEPROM { ee_data[i] = data[i]; }
+        else if kind == SAVE_RTC { rtc_reg[i] = if i == 3 { (data[i] as i64) & 7 } else { data[i] as i64 }; }
         else { ee_data[2048 + i] = data[i]; }
     }
+}
+
+// Cartridge RTC: set the clock (call after power_on; weekday 0 = Sunday).
+// It then runs off emulated time. No effect on carts without an RTC.
+fn has_rtc() -> bool { rtc_present }
+fn set_rtc_datetime(year: i64, month: i64, day: i64, weekday: i64, hour: i64, minute: i64, second: i64) {
+    rtc_set_datetime(year, month, day, weekday, hour, minute, second);
 }

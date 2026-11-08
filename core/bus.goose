@@ -74,6 +74,8 @@ fn port_rd(p: i64) -> i64 {
     if p >= 0xC4 && p <= 0xC7 { if cart_eeprom { return io_ports[p] as i64; } return 0xFF; }  // cart EEPROM latches, else open bus
     if p == 0xC8 { if cart_eeprom { return 0x02 | ((io_ports[0xC8] as i64) & 1); } return 0xFF; }  // cart EEPROM status: ready | DONE
     if p == 0x52 && ((io_ports[0x60] as i64) & 0x80) != 0 { return (io_ports[0x52] as i64) & 0xDF; }  // SDMA_CTRL: ENABLE reads live (it self-clears on a zero length / at the end), bit 5 does not exist
+    if p == 0xCA { return if rtc_present { rtc_read_command() } else { 0x90 }; }  // cartridge RTC command/status, open bus when absent
+    if p == 0xCB { return if rtc_present { rtc_read_data() } else { 0x90 }; }     // cartridge RTC data
     if p == 0xC0 { return bk_linear; }
     if p == 0xC1 { return bk_ram; }
     if p == 0xC2 { return bk_rom0; }
@@ -122,6 +124,8 @@ fn port_wr(p: i64, v: i64) {
     if p == 0xA0 { sys_ctrl1 = (sys_ctrl1 & 0x87) | (v & 0x0C); }
     else if p == 0xB5 { key_select = v & 0x70; }  // KEYPAD: only select bits 4-6 exist
     else if p == 0xB6 { int_cause = int_cause & ~v; }  // INT_CAUSE_CLEAR
+    else if p == 0xCA { if rtc_present { rtc_write_command(v); } }
+    else if p == 0xCB { if rtc_present { rtc_write_data(v); } }
     else if p == 0xC0 { bk_linear = v & 0x3F; }
     else if p == 0xC1 { bk_ram = v; }
     else if p == 0xC2 { bk_rom0 = v; }
@@ -303,7 +307,7 @@ fn ws_boot() {
     cpu_mz = true;
     if rom.len > 16 { model_mono = (rom[rom.len - 9] as i64) == 0; }
     if model_forced >= 0 { model_mono = model_forced == 0; }
-    if rom.len > 16 { ee_init_cart(rom[rom.len - 5] as i64); }
+    if rom.len > 16 { ee_init_cart(rom[rom.len - 5] as i64); rtc_power_on(rom[rom.len - 4] as i64, rom[rom.len - 3] as i64); }
     for i in 1048576 { mem[i] = 0; }
     for i in 256 { io_ports[i] = 0; }
     bk_ram = 0xFF; bk_rom0 = 0xFF; bk_rom1 = 0xFF; bk_linear = 0;
@@ -321,6 +325,7 @@ fn ws_boot() {
 fn ws_frame() {
     if keys_state != 0 && ws_prev_keys == 0 { int_cause |= 0x02 & (io_ports[0xB2] as i64); }  // KEY_PRESS cause latches on the press edge, only when enabled
     ws_prev_keys = keys_state;
+    rtc_tick(40704);
     var spent: i64 = 0;
     while spent < 40704 {
         // Swanium's order: IRQ acceptance (unless held off by the previous

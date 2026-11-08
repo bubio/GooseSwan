@@ -87,6 +87,7 @@ fn front_main() {
     guard read_file(path, image) else { print("cannot read ", path); exit(1); }
     core::power_on(image);
     load_saves(path);
+    sync_rtc_to_host();
     core::set_audio(true);
     if !gfx::open("GooseSwan", 672, 432, gfx::NO_VSYNC | gfx::WINDOW_RESIZABLE) { print("gfx: ", gfx::error()); exit(3); }
     let tex = gfx::texture2d(224, 144);
