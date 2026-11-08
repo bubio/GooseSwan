@@ -47,7 +47,7 @@ fn rd8(p: i64) -> u8 {
 }
 
 fn port_rd(p: i64) -> i64 {
-    if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE4 || dbg_op == 0xE5 || dbg_op == 0xEC || dbg_op == 0xED) { var pre: i64 = 2; if dbg_op == 0xE4 || dbg_op == 0xE5 { pre = 4; } sweep_advance(pre); sweep_prepaid += pre; }  // IN: sweep runs until the sample point (once per instruction)
+    if ws_mode && sweep_prepaid == 0 && (dbg_op == 0xE4 || dbg_op == 0xE5 || dbg_op == 0xEC || dbg_op == 0xED) { var pre: i64 = 2; if dbg_op == 0xE4 { pre = 4; } else if dbg_op == 0xE5 { pre = 5; } sweep_advance(pre); sweep_prepaid += pre; }  // IN: sweep runs until the sample point (once per instruction)
     if p == 0x02 { return (ws_cycles % 40704) / 256; }  // LCD_LINE: current scanline (159 lines x 256 cycles)
     if p == 0xA0 { return sys_ctrl1; }  // SYSTEM_CTRL1 (drives the SPHINX flag variants in test ROMs)
     if p == 0x91 { return (io_ports[0x91] as i64) & 0x0F; }  // SND_OUT_CTRL: only the low 4 bits exist (bit 7 is a status bit, unread here)
