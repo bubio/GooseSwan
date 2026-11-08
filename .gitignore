@@ -1,9 +1,9 @@
 # Goose build output
 .goose/
 *.o
-/gooseswan
+/gooswan
 /tools/sst
-/app/gooseswan
+/app/gooswan
 
 # Test data (large corpora and ROMs are fetched, not committed)
 tests/data/

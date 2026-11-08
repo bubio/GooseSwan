@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Differential check against Swanium (the reference implementation).
 
-Runs a ROM for N frames on GooseSwan (tools/sst run) and on swanium-core
+Runs a ROM for N frames on Gooswan (tools/sst run) and on swanium-core
 (tools/swprobe, built against a sibling Swanium checkout) with the same
 key script, then reports the first frame whose framebuffer differs, how
 many final pixels / WRAM bytes differ, and the audio RMS difference.

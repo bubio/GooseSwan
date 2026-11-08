@@ -1,4 +1,4 @@
-// GooseSwan test harness. Usage:
+// Gooswan test harness. Usage:
 //   sst [v20] <case-file.json> [more files...]   SingleStepTests corpora
 //   sst ws <rom> [suite] [fb|wav|fbwav]          headless ROM runner
 //   sst run <rom> <frames> <out> [keys] [mono|color]  differential dump (see runner.goose)

@@ -1,5 +1,5 @@
 #!/bin/sh
-# The GooseSwan regression battery: unit self-tests, the 8086
+# The Gooswan regression battery: unit self-tests, the 8086
 # corpus baseline, WSHWTest Test All, the framebuffer goldens and
 # the full WSTimingTest harvest (400 passed / 7 failed is the
 # fitted baseline; the 7 are the documented deferred set).

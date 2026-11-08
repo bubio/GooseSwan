@@ -1,4 +1,4 @@
-// GooseSwan frontend: an SDL3 window through Goose's gfx package,
+// Gooswan frontend: an SDL3 window through Goose's gfx package,
 // keyboard input, and the core's audio stream played through the
 // audio package's mixer. The machine is reached only through the core
 // package's API (core/core.goose).
@@ -7,7 +7,7 @@
 // B = Z, Start = Return, Escape closes. Saves land next to the ROM
 // (<rom>.sav / .eep / .iep) on exit and every 600 frames.
 //
-// Usage: gooseswan <rom> [frames] [check]
+// Usage: gooswan <rom> [frames] [check]
 //   frames > 0 stops after that many frames (smoke runs); "check"
 //   then reads the presented screen back and compares it against
 //   the framebuffer (needs a GPU device; lavapipe works).
@@ -77,7 +77,7 @@ fn front_audio_pump() {
 
 fn front_main() {
     let argv = args();
-    if argv.len < 2 { print("usage: gooseswan <rom> [frames] [check]"); exit(2); }
+    if argv.len < 2 { print("usage: gooswan <rom> [frames] [check]"); exit(2); }
     let path = argv[1];
     var max_frames: i64 = 0;
     if argv.len > 2 { max_frames = front_parse(argv[2]); }
@@ -89,7 +89,7 @@ fn front_main() {
     load_saves(path);
     sync_rtc_to_host();
     core::set_audio(true);
-    if !gfx::open("GooseSwan", 672, 432, gfx::NO_VSYNC | gfx::WINDOW_RESIZABLE) { print("gfx: ", gfx::error()); exit(3); }
+    if !gfx::open("Gooswan", 672, 432, gfx::NO_VSYNC | gfx::WINDOW_RESIZABLE) { print("gfx: ", gfx::error()); exit(3); }
     let tex = gfx::texture2d(224, 144);
     let smp = gfx::sampler(gfx::NEAREST, gfx::CLAMP);
     let pipe = gfx::pipeline(front_vs, front_fs);

@@ -1,4 +1,4 @@
-// GooseSwan bus/system: WonderSwan memory map, I/O ports, timers,
+// Gooswan bus/system: WonderSwan memory map, I/O ports, timers,
 // interrupt latching and delivery, GDMA / sound DMA, the serial
 // TX-ready level, and machine boot + one frame (ws_boot/ws_frame).
 namespace core;
@@ -128,7 +128,7 @@ fn init_io_masks() {
         io_always_c[i] = hexval(colp[i * 4 + 2]) * 16 + hexval(colp[i * 4 + 3]);
     }
 }
-// Debug port-write watch (tools: GS_PWATCH).
+// Debug port-write watch (tools: GW_PWATCH).
 var dbg_pwatch: i64 = -1;
 var dbg_pwatch_hits: i64 = 0;
 var dbg_pwatch_last: i64 = 0;

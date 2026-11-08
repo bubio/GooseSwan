@@ -1,4 +1,4 @@
-# GooseSwan
+# Gooswan
 
 WonderSwan / WonderSwan Color emulator written in [Goose](https://github.com/aardappel/goose).
 
@@ -24,7 +24,7 @@ sibling checkout is present. Session notes live in [docs/sessions](docs/sessions
 
 CI (GitHub Actions, modelled on the author's BubiBoyLite setup) builds
 and runs the full battery on every push to main for Linux and macOS;
-publishing a GitHub Release attaches `gooseswan-<platform>-<arch>.zip`
+publishing a GitHub Release attaches `gooswan-<platform>-<arch>.zip`
 (the binary plus this README) to it.
 
 ## Build & run
@@ -37,12 +37,12 @@ The test harness (also the headless ROM runner):
 The frontend (SDL3 window via Goose's gfx package, keyboard input,
 audio out):
 
-    goose build app/gooseswan.goose    # -> app/gooseswan
-    ./app/gooseswan <rom>
+    goose build app/gooswan.goose    # -> app/gooswan
+    ./app/gooswan <rom>
 
 Keys: Y pad = WASD, X pad = arrow keys, A = X, B = Z, Start = Return,
 Escape closes. Save data lands next to the ROM (`<rom>.sav`,
-`<rom>.eep`, `<rom>.iep`). `./app/gooseswan <rom> <frames> check`
+`<rom>.eep`, `<rom>.iep`). `./app/gooswan <rom> <frames> check`
 runs a fixed number of frames and verifies the presented picture
 against the emulated framebuffer (headless-friendly).
 

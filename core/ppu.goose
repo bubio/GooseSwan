@@ -1,4 +1,4 @@
-// GooseSwan PPU: background/sprite rendering into the RGB444
+// Gooswan PPU: background/sprite rendering into the RGB444
 // framebuffer (224x144), one completed scanline at a time.
 namespace core;
 

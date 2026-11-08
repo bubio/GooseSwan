@@ -1,4 +1,4 @@
-// GooseSwan serial EEPROMs: the cartridge and internal 93Cxx devices.
+// Gooswan serial EEPROMs: the cartridge and internal 93Cxx devices.
 namespace core;
 
 // ---- Serial EEPROMs (93Cxx / Microwire), following Swanium's cart

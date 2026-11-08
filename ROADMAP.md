@@ -87,7 +87,7 @@ and the next step recorded in the session notes.
 - Status 2026-11-08: the audio sample stream has landed
   (24 kHz stereo, Swanium's output model, `sst apu_test` 83/83,
   `ws <rom> <suite> wav` writes audio.wav). The frontend has
-  landed too: `goose build app/gooseswan.goose` gives a windowed
+  landed too: `goose build app/gooswan.goose` gives a windowed
   build (gfx texture path pixel-verified headlessly through
   lavapipe, keyboard input, chunked-mixer audio out, save files
   next to the ROM). Remaining: a real game end to end on real

@@ -1,5 +1,5 @@
 // Differential probe: run a ROM on swanium-core for N frames with a key
-// script and dump what GooseSwan's `sst run` dumps, in the same formats.
+// script and dump what Gooswan's `sst run` dumps, in the same formats.
 // usage: swprobe <rom> <frames> <out_prefix> [keys] [mono|color]
 //   keys = "f:bits,f:bits,..." (bits held from frame f until the next entry)
 use std::io::Write;
@@ -47,7 +47,7 @@ fn main() {
     let mut w = vec![];
     for s in &audio { w.extend_from_slice(&s.to_le_bytes()); }
     std::fs::write(format!("{out}.pcm"), w).unwrap();
-    // screen text, same as GooseSwan's ws_screen_text
+    // screen text, same as Gooswan's ws_screen_text
     let base = ((sys.bus().peek_io(0x07) as usize) & 0x0F) << 11;
     let top = ((sys.bus().peek_io(0x11) as usize) >> 3) & 31;
     let mut txt = String::new();

@@ -1,4 +1,4 @@
-// GooseSwan APU: noise LFSR, wave channels, sweep, voice / HyperVoice,
+// Gooswan APU: noise LFSR, wave channels, sweep, voice / HyperVoice,
 // mixer readback ports and the 24 kHz stereo sample stream.
 namespace core;
 
