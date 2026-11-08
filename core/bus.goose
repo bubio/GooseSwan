@@ -150,8 +150,8 @@ fn port_wr(p: i64, v: i64) {
     if !model_mono && p == 0x69 { io_ports[0x64] = 0; io_ports[0x65] = 0; io_ports[0x66] = 0; io_ports[0x67] = 0; }  // HyperVoice data write clears the direct words
     if p == 0xB3 { io_ports[0xB3] = (v & 0xC4) as! u8; }  // SERIAL_CTRL: only enable/speed/overrun bits exist
     if p == 0xB1 || p == 0xB2 || p == 0xB3 { refresh_serial(); }  // serial TX-ready level feeds INT_CAUSE bit 0
-    if p == 0x48 && (v & 0x80) != 0 { run_gdma(); }
-    if p == 0x52 { sdma_tick(0); }  // SDMA_CTRL: start (or, with a zero length, self-clear ENABLE) right away  // GDMA trigger: synchronous burst on the enable write
+    if p == 0x48 && (v & 0x80) != 0 { run_gdma(); }  // GDMA trigger: synchronous burst on the enable write
+    if p == 0x52 { sdma_tick(0); }  // SDMA_CTRL: start (or, with a zero length, self-clear ENABLE) right away
     if p == 0xBE { ie_control(v); }  // IEEPROM control: execute the latched command (0xBC/0xBD)
     if p == 0xBF { io_ports[0xBF] = (v & 1) as! u8; }  // IEEPROM-adjacent control: only bit 0 exists
     if !cart_eeprom && p >= 0xC4 && p <= 0xC9 { io_ports[p] = 0; }  // no cart EEPROM: writes ignored
@@ -205,6 +205,9 @@ fn tick_vbl() {
 // to the serial data/enable/ctrl ports and cleared only via
 // INT_CAUSE_CLEAR, matching Swanium's refresh model — and it is
 // exactly what WSTimingTest's HLT and IRQ loops measure: their
+// handlers never acknowledge the cause, yet the IRQ is taken (and HLT
+// wakes) on every iteration once the serial is on
+// (docs/sessions/2026-11-07-serial-irq.md).
 fn refresh_serial() {
     // The instant TX-ready latch is a mono-machine behaviour (Swanium
     // gates it the same way). On colour carts it must NOT fire:
@@ -311,7 +314,7 @@ fn ws_line_events() {
         last_line += 1; if last_line >= 159 { last_line = 0; }
         tick_hbl();
         if last_line == 144 { tick_vbl(); }
-        if last_line == io_ports[0x03] && last_line < 159 { int_cause |= 0x10 & (io_ports[0xB2] as i64); }
+        if last_line == io_ports[0x03] { int_cause |= 0x10 & (io_ports[0xB2] as i64); }
         var completed: i64 = last_line - 1; if completed < 0 { completed += 159; }
         if completed == 142 { ppu_capture_sprites(true); }
         if completed < 144 { render_line(completed); }
@@ -326,7 +329,7 @@ fn ws_deliver_int() -> bool {
     // after INT_ENABLE changes (Swanium; WSHWTest "IRQs happen when disabled").
     let pending: i64 = int_cause;
     if pending == 0 { return false; }
-    cpu_halted = false;  // a pending enabled interrupt wakes HLT even with IF=0 (it just isn't serviced then; WSTimingTest's HLT case relies on this)
+    cpu_halted = false;  // any latched cause wakes HLT even with IF=0 (it just isn't serviced then; WSTimingTest's HLT case relies on this)
     if (flags & 0x0200) == 0 { return false; }
     var bit: i64 = 7;
     while bit > 0 && ((pending >> bit) & 1) == 0 { bit -= 1; }
@@ -392,6 +395,9 @@ fn ws_frame() {
         // instruction), one instruction, then the TF trap for it.
         let inhibited: bool = irq_inhibit > 0;
         if inhibited { irq_inhibit -= 1; }
+        // While held off, HLT wakes only on a cause that is still enabled;
+        // ws_deliver_int wakes on any latched cause. No test pins which
+        // of the two is right for a cause whose enable was since cleared.
         if inhibited { if (int_cause & io_ports[0xB2]) != 0 { cpu_halted = false; } }
         else if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
         if !cpu_halted {

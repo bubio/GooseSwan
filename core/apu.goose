@@ -107,7 +107,7 @@ fn apu_tick(dc: i64) {
 // scaled by 64; HyperVoice sums into the same domain; port 0x91
 // then selects stereo (bit 7) or the mono speaker sum with its
 // volume shift. Emission is gated by aud_enabled so the headless
-// test runners pay nothing; the frontend will drain aud_buf.
+// test runners pay nothing; the frontend drains aud_buf every frame.
 var aud_enabled:   bool     = false;
 var aud_acc:       i64      = 0;
 var aud_buf:       i64[>..] = [];
@@ -183,10 +183,10 @@ fn apu_out_port(p: i64) -> i64 {
 
 // ---- HyperVoice (colour only): the 8-bit data latch (port 0x69) or
 // the signed 16-bit direct words (ports 0x64-0x67) as an extra PCM
-// source, following Swanium's apu model (after Mednafen). The sample
-// expansion is CPU-invisible today — the audible mix lands with the
-// M5 frontend — but the maths is pinned here by Swanium's own test
-// vectors in apu_test.
+// source, following Swanium's apu model (after Mednafen), mixed into
+// the sample stream by audio_emit. It is CPU-invisible (no readback
+// port), so the maths is pinned by Swanium's own test vectors in
+// apu_test.
 fn hv_sample(ctrl: i64, data: i64) -> i64 {
     let shift: i64 = ctrl & 3;
     let mode:  i64 = ctrl & 0x0C;

@@ -16,6 +16,7 @@ tests/roms/
 *.sav
 *.eep
 *.iep
+*.rtc
 
 # Swanium differential probe build output
 tools/swprobe/target/

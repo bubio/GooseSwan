@@ -100,10 +100,6 @@ var spr_any_on:   bool[224] = [false; 224];
 var spr_front_c:  i64[224]  = [0; 224];
 var spr_front_on: bool[224] = [false; 224];
 
-// Fill the sprite line buffers for line y from the live attribute table
-// (Swanium latches the table per frame; sampling it per line is the
-// documented simplification here). At most 32 sprites per line count,
-// in table order starting at SPR_FIRST; X wraps at 256.
 // Sprite attributes are latched per frame, as Swanium does: the table is
 // captured just before line 142 renders and becomes active when the
 // frame ends, so mid-frame OAM writes show up on the next frame. Until
@@ -132,6 +128,9 @@ fn ppu_promote_sprites() {
     spr_latch_valid = true;
 }
 
+// Fill the sprite line buffers for line y from the latched attribute
+// table. At most 32 sprites per line count, in table order starting at
+// SPR_FIRST; X wraps at 256.
 fn ppu_sprite_line(y: i64) {
     for i in 224 { spr_any_on[i] = false; spr_front_on[i] = false; }
     if !spr_latch_valid { ppu_capture_sprites(false); spr_latch_valid = true; }
