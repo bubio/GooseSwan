@@ -275,7 +275,9 @@ fn ws_line_events() {
         if last_line == 144 { tick_vbl(); }
         if last_line == (io_ports[0x03] as i64) && last_line < 159 { int_cause |= 0x10 & (io_ports[0xB2] as i64); }
         var completed: i64 = last_line - 1; if completed < 0 { completed += 159; }
+        if completed == 142 { ppu_capture_sprites(true); }
         if completed < 144 { render_line(completed); }
+        if last_line == 0 { ppu_promote_sprites(); }
     }
 }
 // Deliver the highest-priority pending hardware interrupt, if any is
@@ -331,6 +333,7 @@ fn ws_boot() {
     ws_prev_keys = 0; ws_total = 0; ws_unsupported = false; ws_frame_carry = 0;
     sweep_prepaid = 0; sdma_running = false; sdma_clock = 0;
     aud_acc = 0; aud_buf = [];
+    spr_latch_valid = false; spr_latch_n = 0; spr_next_n = 0;
 }
 
 fn ws_frame() {

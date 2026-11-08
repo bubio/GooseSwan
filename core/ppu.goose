@@ -104,20 +104,46 @@ var spr_front_on: bool[224] = [false; 224];
 // (Swanium latches the table per frame; sampling it per line is the
 // documented simplification here). At most 32 sprites per line count,
 // in table order starting at SPR_FIRST; X wraps at 256.
-fn ppu_sprite_line(y: i64) {
-    for i in 224 { spr_any_on[i] = false; spr_front_on[i] = false; }
+// Sprite attributes are latched per frame, as Swanium does: the table is
+// captured just before line 142 renders and becomes active when the
+// frame ends, so mid-frame OAM writes show up on the next frame. Until
+// the first capture the live table is latched once.
+var spr_latch: i64[384] = [0; 384];   // w, y, x per entry
+var spr_latch_n: i64 = 0;
+var spr_next: i64[384] = [0; 384];
+var spr_next_n: i64 = 0;
+var spr_latch_valid: bool = false;
+
+fn ppu_capture_sprites(into_next: bool) {
     let base: i64 = ((io_ports[0x04] as i64) & 0x3F) << 9;
     let first: i64 = io_ports[0x05] as i64;
     var count: i64 = io_ports[0x06] as i64; if count > 128 { count = 128; }
+    for i in count {
+        let ea: i64 = base + ((first + i) & 127) * 4;
+        let w: i64 = (mem[ea] as i64) | ((mem[ea + 1] as i64) << 8);
+        if into_next { spr_next[i * 3] = w; spr_next[i * 3 + 1] = mem[ea + 2] as i64; spr_next[i * 3 + 2] = mem[ea + 3] as i64; }
+        else { spr_latch[i * 3] = w; spr_latch[i * 3 + 1] = mem[ea + 2] as i64; spr_latch[i * 3 + 2] = mem[ea + 3] as i64; }
+    }
+    if into_next { spr_next_n = count; } else { spr_latch_n = count; }
+}
+fn ppu_promote_sprites() {
+    for i in spr_next_n * 3 { spr_latch[i] = spr_next[i]; }
+    spr_latch_n = spr_next_n;
+    spr_latch_valid = true;
+}
+
+fn ppu_sprite_line(y: i64) {
+    for i in 224 { spr_any_on[i] = false; spr_front_on[i] = false; }
+    if !spr_latch_valid { ppu_capture_sprites(false); spr_latch_valid = true; }
+    let count: i64 = spr_latch_n;
     let dc: i64 = io_ports[0x00] as i64;
     var used: i64 = 0;
     var n: i64 = 0;
     while n < count && used < 32 {
-        let idx: i64 = (first + n) & 127; n += 1;
-        let ea: i64 = base + idx * 4;
-        let w: i64 = (mem[ea] as i64) | ((mem[ea + 1] as i64) << 8);
-        let sy: i64 = mem[ea + 2] as i64;
-        let sx: i64 = mem[ea + 3] as i64;
+        let w: i64 = spr_latch[n * 3];
+        let sy: i64 = spr_latch[n * 3 + 1];
+        let sx: i64 = spr_latch[n * 3 + 2];
+        n += 1;
         var dy: i64 = y - sy; if dy < 0 { dy += 256; }
         if dy >= 8 { continue; }
         used += 1;

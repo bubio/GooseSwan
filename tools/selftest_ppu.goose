@@ -16,6 +16,7 @@ fn ppu_clear() {
     for i in 256 { io_ports[i] = 0; }
     for i in 65536 { mem[i] = 0; }
     for i in 32256 { fb[i] = 0; }
+    spr_latch_valid = false;  // scenes rewrite the table: re-latch it at the next render
 }
 
 fn ppu_set16(addr: i64, w: i64) { mem[addr] = (w & 0xFF) as! u8; mem[addr + 1] = ((w >> 8) & 0xFF) as! u8; }
@@ -136,6 +137,7 @@ fn ppu_test() {
     ppu_set_sprite(0xC00, 1, 0, 0);
     ppu_set_sprite(0xC04, 1 | (1 << 13), 0, 16);
     ppu_set_sprite(0xC08, 1, 0, 8);
+    spr_latch_valid = false;
     render_line(0);
     ppu_check("s4 prio0 behind scr2 x0", fb[0] as i64, 0x888);
     ppu_check("s4 prio0 through transparent scr2 x8", fb[8] as i64, 0xCCC);
@@ -145,6 +147,7 @@ fn ppu_test() {
     io_ports[0x06] = 4;
     io_ports[0x00] = 1 | 2 | 4 | 8;
     io_ports[0x0C] = 0; io_ports[0x0D] = 0; io_ports[0x0E] = 35; io_ports[0x0F] = 0;
+    spr_latch_valid = false;
     render_line(0);
     ppu_check("s4 sprwin hidden x32", fb[32] as i64, 0x000);
     ppu_check("s4 sprwin shown x36", fb[36] as i64, 0xCCC);
@@ -165,6 +168,7 @@ fn ppu_test() {
     ppu_check("s4 limit 33rd ignored x16", fb[16] as i64, 0xFFF);
     ppu_set_sprite(0x800 + 5 * 4, 1, 0, 16);
     ppu_set_sprite(0x800 + 32 * 4, 4 << 9, 0, 128);
+    spr_latch_valid = false;
     render_line(0);
     ppu_check("s4 limit slot5 visible x16", fb[16] as i64, 0xCCC);
     // Y wrap: sprite at Y=254 covers line 1 at tile row 3 (all pixel 0)
