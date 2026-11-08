@@ -54,9 +54,13 @@ fn port_rd(p: i64) -> i64 {
     if p >= 0x96 && p <= 0x9B { return apu_out_port(p); }  // SND_CH_OUT: current mixer levels
     if p == 0x92 { return lfsr & 0xFF; }  // SND_RANDOM low
     if p == 0x93 { return (lfsr >> 8) & 0xFF; }  // SND_RANDOM high
-    if p == 0xB0 { return (io_ports[0xB0] as i64) & 0xF8; }  // INT_VECTOR: low 3 bits do not exist
+    if p == 0xB0 {  // INT_VECTOR: on mono the low 3 bits report the highest pending cause (ws-test-suite soc/interrupts); colour reads them as 0 (WSHWTest)
+        var v: i64 = (io_ports[0xB0] as i64) & 0xF8;
+        if model_mono { var bit: i64 = 7; while bit > 0 && ((int_cause >> bit) & 1) == 0 { bit -= 1; } v |= bit; }
+        return v;
+    }
     if p == 0xB1 { return 0; }  // SERIAL_DATA: receive buffer, empty
-    if p == 0xB4 { return int_cause; }  // INT_CAUSE
+    if p == 0xB4 { refresh_serial(); return int_cause; }  // INT_CAUSE (the TX-ready level re-asserts on read)
     if p == 0xB5 {  // KEYPAD: selector echoed back, selected scan groups OR-ed into the low nibble
         var v: i64 = key_select;
         if (key_select & 0x10) != 0 { v |= keys_state & 0x0F; }
@@ -104,8 +108,8 @@ fn port_wr(p: i64, v: i64) {
     if p == 0x8E && (v & 0x08) != 0 { lfsr = 0; noise_acc = 0; io_ports[0x8E] = (v & 0xF7) as! u8; }  // SND_NOISE_CTRL reset: reseed LFSR, bit self-clears
     if p == 0x8C || p == 0x8D { sweep_ctr = 0; sweep_step = 0; }  // sweep register writes reset the sweep timer
     if p == 0x89 { voice_feed(v); }  // voice data latch: feeds the reconstruction low-pass while voice mode is on
-    if !ws_mono_cart && p >= 0x64 && p <= 0x67 { io_ports[0x69] = 0; }  // HyperVoice direct write clears the data latch (colour only)
-    if !ws_mono_cart && p == 0x69 { io_ports[0x64] = 0; io_ports[0x65] = 0; io_ports[0x66] = 0; io_ports[0x67] = 0; }  // HyperVoice data write clears the direct words
+    if !model_mono && p >= 0x64 && p <= 0x67 { io_ports[0x69] = 0; }  // HyperVoice direct write clears the data latch (colour only)
+    if !model_mono && p == 0x69 { io_ports[0x64] = 0; io_ports[0x65] = 0; io_ports[0x66] = 0; io_ports[0x67] = 0; }  // HyperVoice data write clears the direct words
     if p == 0xB3 { io_ports[0xB3] = (v & 0xC4) as! u8; }  // SERIAL_CTRL: only enable/speed/overrun bits exist
     if p == 0xB1 || p == 0xB2 || p == 0xB3 { refresh_serial(); }  // serial TX-ready level feeds INT_CAUSE bit 0
     if p == 0x48 && (v & 0x80) != 0 { run_gdma(); }  // GDMA trigger: synchronous burst on the enable write
@@ -162,7 +166,7 @@ fn refresh_serial() {
     // WSHWTest's IO-register test pattern-writes INT_ENABLE = 0xFF
     // with the serial left enabled, and an instantly-pending
     // non-acknowledged IRQ would livelock that test on the spot.
-    if ws_mono_cart && ((io_ports[0xB2] as i64) & 1) != 0 && ((io_ports[0xB3] as i64) & 0x80) != 0 { int_cause |= 0x01; }
+    if model_mono && ((io_ports[0xB2] as i64) & 1) != 0 && ((io_ports[0xB3] as i64) & 0x80) != 0 { int_cause |= 0x01; }
 }
 
 fn run_gdma() {
@@ -227,7 +231,7 @@ fn sdma_step() {
 }
 
 fn sdma_tick(dc: i64) {
-    if ws_mono_cart || ((io_ports[0x52] as i64) & 0x80) == 0 { sdma_running = false; sdma_clock = 0; return; }
+    if model_mono || ((io_ports[0x52] as i64) & 0x80) == 0 { sdma_running = false; sdma_clock = 0; return; }
     if !sdma_running {
         let counter: i64 = sdma_counter_from_ports();
         if counter == 0 { io_ports[0x52] = ((io_ports[0x52] as i64) & 0x7F) as! u8; return; }  // nothing to send: ENABLE self-clears
@@ -295,7 +299,8 @@ fn ws_boot() {
     ws_mode = true;
     cpu_v20 = true;
     cpu_mz = true;
-    if rom.len > 16 { ws_mono_cart = (rom[rom.len - 9] as i64) == 0; }
+    if rom.len > 16 { model_mono = (rom[rom.len - 9] as i64) == 0; }
+    if model_forced >= 0 { model_mono = model_forced == 0; }
     if rom.len > 16 { ee_init_cart(rom[rom.len - 5] as i64); }
     for i in 1048576 { mem[i] = 0; }
     for i in 256 { io_ports[i] = 0; }
@@ -339,4 +344,9 @@ fn ws_frame() {
 }
 
 
-var ws_mono_cart: bool = false;  // set from the ROM footer in run_ws: mono-only carts get the mono serial behaviour
+// Hardware model: the monochrome WonderSwan (model_mono) or a Color-class
+// machine. ws_boot picks it from the cartridge footer's colour flag, as
+// Swanium's HardwareModel::from_color_flag does; model_forced (set via
+// core::set_model before power_on) overrides that choice.
+var model_mono: bool = false;
+var model_forced: i64 = -1;  // -1 = from the footer, 0 = mono, 1 = colour

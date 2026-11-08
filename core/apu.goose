@@ -199,7 +199,7 @@ fn hv_sample(ctrl: i64, data: i64) -> i64 {
 
 fn hv_output() -> i64, i64 {
     let ctrl: i64 = io_ports[0x6A] as i64;
-    if ws_mono_cart || !ppu_color_mode() || (ctrl & 0x80) == 0 { return 0, 0; }
+    if model_mono || !ppu_color_mode() || (ctrl & 0x80) == 0 { return 0, 0; }
     let dl: i64 = s16((io_ports[0x64] as i64) | ((io_ports[0x65] as i64) << 8));
     let dr: i64 = s16((io_ports[0x66] as i64) | ((io_ports[0x67] as i64) << 8));
     if dl != 0 || dr != 0 { return dl, dr; }

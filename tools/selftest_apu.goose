@@ -120,7 +120,7 @@ fn apu_test() {
     apu_check("fast sweep meas2", port_rd(0x84) | (port_rd(0x85) << 8), 266);
     ws_mode = false;
     // Serial TX-ready level: latches when serial + its IRQ are on (mono carts)
-    ws_mono_cart = true;
+    model_mono = true;
     apu_reset_state();
     port_wr(0xB3, 0xC0);
     apu_check("serial no latch before enable", int_cause & 1, 0);
@@ -134,13 +134,13 @@ fn apu_test() {
     port_wr(0xB3, 0xC0);
     apu_check("serial latched by ctrl enable", int_cause & 1, 1);
     apu_check("serial ctrl mask", io_ports[0xB3] as i64, 0xC0);
-    ws_mono_cart = false;
+    model_mono = false;
     apu_reset_state();
     port_wr(0xB3, 0xC0);
     port_wr(0xB2, 0x01);
     apu_check("serial no latch on colour carts", int_cause & 1, 0);
     // Sound DMA (colour): cadence, writeback, decrement, repeat, hold
-    ws_mono_cart = false;
+    model_mono = false;
     apu_reset_state();
     mem[0x2000] = 0x11; mem[0x2001] = 0x22; mem[0x2002] = 0x33;
     port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x4C, 0x00);
@@ -191,13 +191,13 @@ fn apu_test() {
     port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x52, 0x83);
     sdma_tick(256);
     apu_check("sdma zero counter clears enable", (io_ports[0x52] as i64) & 0x80, 0);
-    ws_mono_cart = true;
+    model_mono = true;
     apu_reset_state();
     mem[0x2000] = 0x11;
     port_wr(0x4A, 0x00); port_wr(0x4B, 0x20); port_wr(0x4E, 0x01); port_wr(0x52, 0x83);
     sdma_tick(256);
     apu_check("sdma silent on mono carts", io_ports[0x89] as i64, 0);
-    ws_mono_cart = false;
+    model_mono = false;
     // HyperVoice port semantics and sample maths (Swanium's vectors)
     apu_reset_state();
     port_wr(0x64, 0xAA); port_wr(0x65, 0xBB);

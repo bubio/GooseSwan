@@ -41,6 +41,14 @@ let SAVE_SRAM: i64 = 0;
 let SAVE_CART_EEPROM: i64 = 1;
 let SAVE_INTERNAL_EEPROM: i64 = 2;
 
+// Hardware model for the next power_on: MODEL_AUTO follows the cartridge
+// footer's colour flag (mono carts run on a mono WonderSwan).
+let MODEL_AUTO: i64 = -1;
+let MODEL_MONO: i64 = 0;
+let MODEL_COLOR: i64 = 1;
+fn set_model(m: i64) { model_forced = m; }
+fn is_mono() -> bool { model_mono }
+
 // Power on with a cartridge image (the whole .ws/.wsc file).
 fn power_on(image: const u8[:]) {
     rom = [];

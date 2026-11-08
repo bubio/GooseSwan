@@ -11,7 +11,7 @@ fn ee_check(name: const u8[:], got: i64, want: i64) {
 
 fn ee_reset(save: i64) {
     for i in 256 { io_ports[i] = 0; }
-    ws_mode = true; ws_mono_cart = false; dbg_op = 0;
+    ws_mode = true; model_mono = false; dbg_op = 0;
     ee_init_cart(save);
 }
 
