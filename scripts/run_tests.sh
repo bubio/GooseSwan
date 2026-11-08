@@ -19,7 +19,7 @@ echo "8086 corpus: $total"
 $SST ws tests/roms/WSHWTest.wsc m1 > /tmp/testall.txt 2>&1
 if grep -qi failed /tmp/testall.txt; then echo "FAIL: WSHWTest Test All" >&2; exit 1; fi
 echo "WSHWTest Test All: pass"
-./tests/fb_check.sh
+sh ./tests/fb_check.sh
 pass=0
 fail=0
 for n in $(seq 0 28); do

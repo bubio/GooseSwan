@@ -6,4 +6,4 @@ set -e
 cd "$(dirname "$0")/.."
 goose build src/sst.goose
 goose build src/gooseswan.goose
-if [ "$1" = "--test" ]; then ./scripts/run_tests.sh; fi
+if [ "$1" = "--test" ]; then sh ./scripts/run_tests.sh; fi
