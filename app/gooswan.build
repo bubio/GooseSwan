@@ -1,0 +1,2 @@
+// The frontend's own C: the streaming audio output (hostaudio.c).
+c_sources = ["hostaudio.c"];
