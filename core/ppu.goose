@@ -20,10 +20,10 @@ fn ppu_tile_pixel(tile: i64, tx: i64, ty: i64) -> i64 {
         for pl in 4 { px |= (((mem[base + pl] as i64) >> bit) & 1) << pl; }
         return px;
     }
-    let a: i64 = 0x2000 + tile * 16 + ty * 2;
+    let a:    i64 = 0x2000 + tile * 16 + ty * 2;
     let bit2: i64 = 7 - tx;
-    let lo: i64 = ((mem[a] as i64) >> bit2) & 1;
-    let hi: i64 = ((mem[a + 1] as i64) >> bit2) & 1;
+    let lo:   i64 = ((mem[a] as i64) >> bit2) & 1;
+    let hi:   i64 = ((mem[a + 1] as i64) >> bit2) & 1;
     return (hi << 1) | lo;
 }
 
@@ -65,16 +65,16 @@ fn ppu_backdrop() -> i64 {
 }
 
 fn ppu_bg_sample(layer: i64, x: i64, y: i64) -> i64, i64 {
-    var sx: i64 = io_ports[0x10];
-    var sy: i64 = io_ports[0x11];
+    var sx:  i64 = io_ports[0x10];
+    var sy:  i64 = io_ports[0x11];
     var nib: i64 = (io_ports[0x07] as i64) & 0x0F;
     if layer == 1 { sx = io_ports[0x12]; sy = io_ports[0x13]; nib = ((io_ports[0x07] as i64) >> 4) & 0x0F; }
     if !ppu_color_mode() { nib = nib & 7; }
     let base: i64 = nib << 11;
-    let bgx: i64 = (x + sx) & 0xFF;
-    let bgy: i64 = (y + sy) & 0xFF;
-    let ea: i64 = base + (((bgy >> 3) * 32) + (bgx >> 3)) * 2;
-    let w: i64 = mem[ea] | ((mem[ea + 1] as i64) << 8);
+    let bgx:  i64 = (x + sx) & 0xFF;
+    let bgy:  i64 = (y + sy) & 0xFF;
+    let ea:   i64 = base + (((bgy >> 3) * 32) + (bgx >> 3)) * 2;
+    let w:    i64 = mem[ea] | ((mem[ea + 1] as i64) << 8);
     var tile: i64 = w & 0x1FF;
     if ppu_color_mode() && (w & 0x2000) != 0 { tile += 512; }
     let pal: i64 = (w >> 9) & 0x0F;
@@ -95,9 +95,9 @@ fn ppu_scr2_visible(x: i64, y: i64) -> bool {
 
 // Sprite line buffers: the first opaque sprite pixel per column (any
 // priority) and the first opaque priority-1 (in front of SCR2) pixel.
-var spr_any_c: i64[224] = [0; 224];
-var spr_any_on: bool[224] = [false; 224];
-var spr_front_c: i64[224] = [0; 224];
+var spr_any_c:    i64[224]  = [0; 224];
+var spr_any_on:   bool[224] = [false; 224];
+var spr_front_c:  i64[224]  = [0; 224];
 var spr_front_on: bool[224] = [false; 224];
 
 // Fill the sprite line buffers for line y from the live attribute table
@@ -108,19 +108,19 @@ var spr_front_on: bool[224] = [false; 224];
 // captured just before line 142 renders and becomes active when the
 // frame ends, so mid-frame OAM writes show up on the next frame. Until
 // the first capture the live table is latched once.
-var spr_latch: i64[384] = [0; 384];   // w, y, x per entry
-var spr_latch_n: i64 = 0;
-var spr_next: i64[384] = [0; 384];
-var spr_next_n: i64 = 0;
-var spr_latch_valid: bool = false;
+var spr_latch:       i64[384] = [0; 384]; // w, y, x per entry
+var spr_latch_n:     i64      = 0;
+var spr_next:        i64[384] = [0; 384];
+var spr_next_n:      i64      = 0;
+var spr_latch_valid: bool     = false;
 
 fn ppu_capture_sprites(into_next: bool) {
-    let base: i64 = ((io_ports[0x04] as i64) & 0x3F) << 9;
+    let base:  i64 = ((io_ports[0x04] as i64) & 0x3F) << 9;
     let first: i64 = io_ports[0x05];
     var count: i64 = io_ports[0x06]; if count > 128 { count = 128; }
     for i in count {
         let ea: i64 = base + ((first + i) & 127) * 4;
-        let w: i64 = mem[ea] | ((mem[ea + 1] as i64) << 8);
+        let w:  i64 = mem[ea] | ((mem[ea + 1] as i64) << 8);
         if into_next { spr_next[i * 3] = w; spr_next[i * 3 + 1] = mem[ea + 2]; spr_next[i * 3 + 2] = mem[ea + 3]; }
         else { spr_latch[i * 3] = w; spr_latch[i * 3 + 1] = mem[ea + 2]; spr_latch[i * 3 + 2] = mem[ea + 3]; }
     }
@@ -136,11 +136,11 @@ fn ppu_sprite_line(y: i64) {
     for i in 224 { spr_any_on[i] = false; spr_front_on[i] = false; }
     if !spr_latch_valid { ppu_capture_sprites(false); spr_latch_valid = true; }
     let count: i64 = spr_latch_n;
-    let dc: i64 = io_ports[0x00];
+    let dc:    i64 = io_ports[0x00];
     var used: i64 = 0;
-    var n: i64 = 0;
+    var n:    i64 = 0;
     while n < count && used < 32 {
-        let w: i64 = spr_latch[n * 3];
+        let w:  i64 = spr_latch[n * 3];
         let sy: i64 = spr_latch[n * 3 + 1];
         let sx: i64 = spr_latch[n * 3 + 2];
         n += 1;
@@ -148,9 +148,9 @@ fn ppu_sprite_line(y: i64) {
         if dy >= 8 { continue; }
         used += 1;
         var ty: i64 = dy; if (w & 0x8000) != 0 { ty = 7 - ty; }
-        let tile: i64 = w & 0x1FF;
-        let pal: i64 = ((w >> 9) & 7) + 8;
-        let prio: bool = (w & 0x2000) != 0;
+        let tile:  i64  = w & 0x1FF;
+        let pal:   i64  = ((w >> 9) & 7) + 8;
+        let prio:  bool = (w & 0x2000) != 0;
         let wattr: bool = (w & 0x1000) != 0;
         for dx in 8 {
             var x: i64 = sx + dx; if x >= 256 { x -= 256; }
@@ -169,15 +169,15 @@ fn ppu_sprite_line(y: i64) {
 
 fn render_line(y: i64) {
     if y < 0 || y >= 144 { return; }
-    let dc: i64 = io_ports[0x00];
-    let bd: i64 = ppu_backdrop();
+    let dc:  i64 = io_ports[0x00];
+    let bd:  i64 = ppu_backdrop();
     let row: i64 = y * 224;
     if (dc & 4) != 0 { ppu_sprite_line(y); }
     for x in 224 {
         var c: i64 = bd;
         if (dc & 1) != 0 { let px, pal = ppu_bg_sample(0, x, y); if !ppu_transparent(pal, px) { c = ppu_resolve(pal, px); } }
         var s2_on: bool = false;
-        var s2_c: i64 = 0;
+        var s2_c:  i64  = 0;
         if (dc & 2) != 0 && ppu_scr2_visible(x, y) { let px2, pal2 = ppu_bg_sample(1, x, y); if !ppu_transparent(pal2, px2) { s2_on = true; s2_c = ppu_resolve(pal2, px2); } }
         if (dc & 4) != 0 {
             if s2_on { if spr_front_on[x] { c = spr_front_c[x]; } else { c = s2_c; } }

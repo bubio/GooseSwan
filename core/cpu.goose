@@ -2,25 +2,25 @@
 // executor, and the WSTimingTest-fitted cycle model.
 namespace core;
 
-var mem: u8[1048576] = [0; 1048576];
-var r: u16[8] = [0; 8];      // encoding order: ax cx dx bx sp bp si di
-var seg: u16[4] = [0; 4];    // es cs ss ds
-var ip: u16 = 0;
-var flags: u16 = 0;
+var mem:   u8[1048576] = [0; 1048576];
+var r:     u16[8]      = [0; 8]; // encoding order: ax cx dx bx sp bp si di
+var seg:   u16[4]      = [0; 4]; // es cs ss ds
+var ip:    u16         = 0;
+var flags: u16         = 0;
 
-var cyc_tab: i64[256] = [0; 256];  // per-opcode cycle estimates for the WS timing model (fitted against WSTimingTest)
-var dbg_taken: bool = false;  // last branch outcome, for the cycle estimator
-var dbg_back: bool = false;  // last branch jumped backward
-var dbg_head: i64 = 0;  // target offset of the last taken relative branch
-var xfer_flag: bool = false;  // a control transfer already executed in the current loop iteration (the loop tail then costs +2: second prefetch flush)
-var dbg_odd: bool = false;  // last relative branch landed on an odd offset
-var dbg_disp: i64 = 0;  // displacement of the last relative branch (loop span = -disp)
-var dbg_shift_cnt: i64 = 0;  // effective shift count of the last shift/rotate
-var fault_chg: i64 = 0;  // interrupt-entry charge when the last instruction faulted (set in do_int)
-var fault_base: i64 = 0;  // partial-execution cost of the faulting instruction
-var cyc_in_exec: bool = false;  // true while exec_one runs under the WS runner
-var d_valid: bool = false;  // a ModRM was decoded for the current instruction
-var d_rm: i64 = 0;  // rm field of the current ModRM
+var cyc_tab:       i64[256] = [0; 256]; // per-opcode cycle estimates for the WS timing model (fitted against WSTimingTest)
+var dbg_taken:     bool     = false; // last branch outcome, for the cycle estimator
+var dbg_back:      bool     = false; // last branch jumped backward
+var dbg_head:      i64      = 0; // target offset of the last taken relative branch
+var xfer_flag:     bool     = false; // a control transfer already executed in the current loop iteration (the loop tail then costs +2: second prefetch flush)
+var dbg_odd:       bool     = false; // last relative branch landed on an odd offset
+var dbg_disp:      i64      = 0; // displacement of the last relative branch (loop span = -disp)
+var dbg_shift_cnt: i64      = 0; // effective shift count of the last shift/rotate
+var fault_chg:     i64      = 0; // interrupt-entry charge when the last instruction faulted (set in do_int)
+var fault_base:    i64      = 0; // partial-execution cost of the faulting instruction
+var cyc_in_exec:   bool     = false; // true while exec_one runs under the WS runner
+var d_valid:       bool     = false; // a ModRM was decoded for the current instruction
+var d_rm:          i64      = 0; // rm field of the current ModRM
 fn init_cyc() {
     for i in 256 { cyc_tab[i] = 4; }
     for i in 0x40 { cyc_tab[i] = 3; }  // ALU block; form splits applied in est_cycles
@@ -128,8 +128,8 @@ fn cyc_fault_base() -> i64 {
 fn est_cycles(pre_cx: i64) -> i64 {
     let op: i64 = dbg_op;
     if fault_chg > 0 { xfer_flag = true; return fault_base + fault_chg; }
-    var c: i64 = 0;
-    var is_tail: bool = false;
+    var c:         i64  = 0;
+    var is_tail:   bool = false;
     var sets_xfer: bool = false;
     if rep_prefix != 0 && ((op >= 0xA4 && op <= 0xAF) || (op >= 0x6C && op <= 0x6F)) {
         var n: i64 = pre_cx - r[1]; if n < 0 { n += 65536; }
@@ -178,12 +178,12 @@ fn seg_wr16(base: i64, off: i64, v: u16) { wb8((base + off) & 0xFFFFF, v as! u8)
 // SingleStepTests harness drives: writes are recorded so a case can
 // restore RAM afterwards; recording is on only while a case executes.
 // Debug write watchpoint (tools: GW_WATCH): last writer CS:IP and value.
-var dbg_watch: i64 = -1;
-var dbg_watch_hits: i64 = 0;
-var dbg_watch_last: i64 = 0;
-var dbg_watch_val: i64 = 0;
-var touched: i64[>..<] = [];
-var recording: bool = false;
+var dbg_watch:      i64       = -1;
+var dbg_watch_hits: i64       = 0;
+var dbg_watch_last: i64       = 0;
+var dbg_watch_val:  i64       = 0;
+var touched:        i64[>..<] = [];
+var recording:      bool      = false;
 
 fn wb8(p: i64, v: u8) {
     if ws_mode {
@@ -208,18 +208,18 @@ fn set_r8(i: i64, v: u8) {
 }
 
 // ---- ModRM decode (16-bit addressing) ----
-var seg_override: i64 = -1;  // segment override prefix, -1 = none
-var rep_prefix: i64 = 0;  // 0 = none, 2 = REPNE (F2), 3 = REP/REPE (F3), 4 = V20 rep-while-CF=0 (64), 5 = V20 rep-while-CF=1 (65)
-var cpu_v20: bool = false;  // NEC V20 profile, selected by the "v20" CLI argument
-var cpu_mz: bool = false;   // V30MZ deltas on top of the V20 profile (WSCpuTest authority), set by the WS runner
-var dbg_op: i64 = 0;        // last opcode byte executed (after prefixes), for runner diagnostics
-var dbg_ip: i64 = 0;        // ip at which it started
-var d_reg: i64 = 0;
-var d_isreg: bool = false;
-var d_regidx: i64 = 0;
-var d_addr: i64 = 0;
-var d_segbase: i64 = 0;
-var d_off: i64 = 0;
+var seg_override: i64  = -1; // segment override prefix, -1 = none
+var rep_prefix:   i64  = 0; // 0 = none, 2 = REPNE (F2), 3 = REP/REPE (F3), 4 = V20 rep-while-CF=0 (64), 5 = V20 rep-while-CF=1 (65)
+var cpu_v20:      bool = false; // NEC V20 profile, selected by the "v20" CLI argument
+var cpu_mz:       bool = false; // V30MZ deltas on top of the V20 profile (WSCpuTest authority), set by the WS runner
+var dbg_op:       i64  = 0;     // last opcode byte executed (after prefixes), for runner diagnostics
+var dbg_ip:       i64  = 0;     // ip at which it started
+var d_reg:        i64  = 0;
+var d_isreg:      bool = false;
+var d_regidx:     i64  = 0;
+var d_addr:       i64  = 0;
+var d_segbase:    i64  = 0;
+var d_off:        i64  = 0;
 
 fn decode_modrm() {
     let m = fetch8();
@@ -290,12 +290,12 @@ fn parity_even(v: i64) -> bool {
 fn alu_op(kind: i64, a: i64, b: i64, bits: i64) -> i64 {
     // kind: 0 ADD, 1 OR, 2 ADC, 3 SBB, 4 AND, 5 SUB, 6 XOR, 7 CMP
     // a and b are unsigned values already masked to the operand width.
-    let mask: i64 = if bits == 16 { 0xFFFF } else { 0xFF };
-    let sign: i64 = if bits == 16 { 0x8000 } else { 0x80 };
+    let mask:  i64 = if bits == 16 { 0xFFFF } else { 0xFF };
+    let sign:  i64 = if bits == 16 { 0x8000 } else { 0x80 };
     let cf_in: i64 = if (flags & 1) != 0 { 1 } else { 0 };
     var res: i64 = 0; var cf_out: i64 = 0; var af: i64 = 0; var of: i64 = 0;
     if kind == 0 || kind == 2 {  // ADD / ADC
-        let c: i64 = if kind == 2 { cf_in } else { 0 };
+        let c:    i64 = if kind == 2 { cf_in } else { 0 };
         let full: i64 = a + b + c;
         res = full & mask;
         cf_out = if full > mask { 1 } else { 0 };
@@ -322,7 +322,6 @@ fn alu_op(kind: i64, a: i64, b: i64, bits: i64) -> i64 {
     return res;
 }
 
-
 fn incdec_flags(a: i64, res: i64, dec: bool, bits: i64) {
     let sign: i64 = if bits == 16 { 0x8000 } else { 0x80 };
     var f: i64 = (flags as i64) & 0xF72B;  // INC/DEC preserve CF
@@ -335,13 +334,12 @@ fn incdec_flags(a: i64, res: i64, dec: bool, bits: i64) {
 }
 fn do_incdec(v: i64, dec: bool, bits: i64) -> i64 {
     let mask: i64 = if bits == 16 { 0xFFFF } else { 0xFF };
-    let res: i64 = if dec { (v - 1) & mask } else { (v + 1) & mask };
+    let res:  i64 = if dec { (v - 1) & mask } else { (v + 1) & mask };
     incdec_flags(v, res, dec, bits);
     return res;
 }
 fn push16(v: i64) { r[4] = r[4] - 2; seg_wr16((seg[2] as i64) << 4, r[4], v as! u16); }
 fn pop16() -> i64 { let v: i64 = seg_rd16((seg[2] as i64) << 4, r[4]); r[4] = r[4] + 2; v }
-
 
 fn cond(c: i64) -> bool {
     let f: i64 = flags;
@@ -366,8 +364,8 @@ fn rel_jump(d: i64) { ip = ((ip + d) & 0xFFFF) as! u16; dbg_head = ip; dbg_odd =
 // lands right after a long REP string instruction (>= 256 cycles)
 // returns to that instruction's first prefix byte, as hardware
 // restarts it (ws-test-suite prefixes: REP:ESx8:MOVSB(IRQ)).
-var irq_inhibit: i64 = 0;
-var trap_inhibit: i64 = 0;
+var irq_inhibit:      i64 = 0;
+var trap_inhibit:     i64 = 0;
 var irq_ret_override: i64 = -1;
 
 fn do_int(n: i64) { do_int_at(n, ip); }
@@ -380,7 +378,6 @@ fn do_int_at(n: i64, ret_ip: i64) {
     ip = seg_rd16(0, n * 4);
     seg[1] = seg_rd16(0, n * 4 + 2);
 }
-
 
 fn s8(v: i64) -> i64 { if v > 127 { v - 256 } else { v } }
 fn s16(v: i64) -> i64 { if v > 32767 { v - 65536 } else { v } }
@@ -412,7 +409,7 @@ fn shift_op(kind: i64, v: i64, count: i64, bits: i64) -> i64 {
     }
     if cnt == 0 && !(cpu_mz && kind >= 4) { return v; }
     let mask: i64 = if bits == 16 { 0xFFFF } else { 0xFF };
-    let top: i64 = bits - 1;
+    let top:  i64 = bits - 1;
     if cnt == 0 {
         // V30MZ: a shift whose masked count is 0 keeps the operand and
         // CF, latches SZP from the operand, clears AF, and recomputes OF
@@ -426,7 +423,7 @@ fn shift_op(kind: i64, v: i64, count: i64, bits: i64) -> i64 {
         flags = f0 as! u16;
         return v;
     }
-    var cf: i64 = (flags as i64) & 1;
+    var cf:  i64 = (flags as i64) & 1;
     var res: i64 = v;
     if kind <= 3 {  // rotates: only CF and OF change
         for i in cnt {
@@ -481,7 +478,7 @@ fn divu16_err_zf(dxh: i64, axv: i64, dvs: i64) -> i64 {
     let bx: i64 = nb >> 2;
     var ah: i64 = (axv >> 8) & 0xC0;
     var dx: i64 = dxh;
-    var s: i64 = ah + al; var c: i64 = if s > 0xFF { 1 } else { 0 }; ah = s & 0xFF; dx = (dx + bx + c) & 0xFFFF;
+    var s:  i64 = ah + al; var c: i64 = if s > 0xFF { 1 } else { 0 }; ah = s & 0xFF; dx = (dx + bx + c) & 0xFFFF;
     if (((dx >> 8) & 0xFF) | (dx & 0xFF) | ah) == 0 { return 1; }
     s = ah + al; c = if s > 0xFF { 1 } else { 0 }; ah = s & 0xFF; dx = (dx + bx + c) & 0xFFFF;
     s = ah + al; c = if s > 0xFF { 1 } else { 0 }; ah = s & 0xFF;
@@ -512,21 +509,20 @@ fn flag_inhibits(old: i64) {
 fn load_flags(v: i64) { flags = (((v & 0x0FD5) | 0xF002) as! u16); }  // bits 12-15 read as 1, bit 1 as 1, bits 3/5 as 0
 fn src_seg_base(def: i64) -> i64 { let s: i64 = if seg_override >= 0 { seg_override } else { def }; (seg[s] as i64) << 4 }
 fn trunc_divmod(a: i64, b: i64) -> i64, i64 {
-    let aa: i64 = if a < 0 { 0 - a } else { a };
-    let bb: i64 = if b < 0 { 0 - b } else { b };
-    let qa: i64 = aa / bb;
+    let aa:  i64  = if a < 0 { 0 - a } else { a };
+    let bb:  i64  = if b < 0 { 0 - b } else { b };
+    let qa:  i64  = aa / bb;
     let neg: bool = (a < 0 && b > 0) || (a > 0 && b < 0);
-    let q: i64 = if neg { 0 - qa } else { qa };
+    let q:   i64  = if neg { 0 - qa } else { qa };
     return q, a - q * b;
 }
 
-
 fn str_step(op: i64) {
     let size16: bool = (op & 1) == 1;
-    let step: i64 = if size16 { 2 } else { 1 };
-    let delta: i64 = if (flags & 0x0400) != 0 { 0 - step } else { step };
-    let sbase: i64 = src_seg_base(3);              // DS, override-aware
-    let dbase: i64 = (seg[0] as i64) << 4;         // ES is never overridden
+    let step:   i64  = if size16 { 2 } else { 1 };
+    let delta:  i64  = if (flags & 0x0400) != 0 { 0 - step } else { step };
+    let sbase:  i64  = src_seg_base(3);            // DS, override-aware
+    let dbase:  i64  = (seg[0] as i64) << 4;       // ES is never overridden
     if op == 0xA4 || op == 0xA5 {  // MOVS
         if size16 { seg_wr16(dbase, r[7], seg_rd16(sbase, r[6])); } else { wb8((dbase + r[7]) & 0xFFFFF, rd8((sbase + r[6]) & 0xFFFFF)); }
         r[6] = ((r[6] + delta) & 0xFFFF) as! u16;
@@ -565,14 +561,13 @@ fn str_step(op: i64) {
     }
 }
 
-
 // ---- NEC V20/V30 extended instructions (0F-prefixed) ----
 fn bcd4_step(d: i64, s: i64, cin: i64, sub: bool) -> i64, i64 {
     // One byte of an ADD4S/SUB4S/CMP4S string: a binary add/sub followed by a
     // DAA/DAS-style correction; the low digit's +6 carries into the high digit
     // like a binary carry, which is where it differs from per-digit BCD.
     if !sub {
-        let t: i64 = d + s + cin;
+        let t:  i64 = d + s + cin;
         let lo: i64 = (d & 0xF) + (s & 0xF) + cin;
         var adj: i64 = 0;
         if lo > 9 { adj += 6; }
@@ -581,11 +576,11 @@ fn bcd4_step(d: i64, s: i64, cin: i64, sub: bool) -> i64, i64 {
         let res: i64 = t + adj;
         return res & 0xFF, if hi > 9 { 1 } else { 0 };
     }
-    let t: i64 = d - s - cin;
+    let t:  i64 = d - s - cin;
     let lo: i64 = (d & 0xF) - (s & 0xF) - cin;
     var adj: i64 = 0;
     if lo < 0 || lo > 9 { adj += 6; }
-    let hi: i64 = (d >> 4) - (s >> 4) - (if lo < 0 { 1 } else { 0 });
+    let hi:  i64  = (d >> 4) - (s >> 4) - (if lo < 0 { 1 } else { 0 });
     let a60: bool = hi < 0 || hi > 9 || (hi == 9 && lo > 9);
     if a60 { adj += 0x60; }
     let res: i64 = t - adj;
@@ -593,13 +588,13 @@ fn bcd4_step(d: i64, s: i64, cin: i64, sub: bool) -> i64, i64 {
 }
 
 fn op_bcd4(op2: i64) {
-    let sub: bool = op2 != 0x20;
-    let cnt: i64 = get_r8(1);  // digit count is CL; bytes processed = ceil(cnt/2), last one in full
-    let sbase: i64 = src_seg_base(3);
-    let dbase: i64 = (seg[0] as i64) << 4;
-    let soff: i64 = r[6];
-    let doff: i64 = r[7];
-    var carry: i64 = 0;
+    let sub:   bool = op2 != 0x20;
+    let cnt:   i64  = get_r8(1); // digit count is CL; bytes processed = ceil(cnt/2), last one in full
+    let sbase: i64  = src_seg_base(3);
+    let dbase: i64  = (seg[0] as i64) << 4;
+    let soff:  i64  = r[6];
+    let doff:  i64  = r[7];
+    var carry:   i64  = 0;
     var allzero: bool = true;
     let nb: i64 = (cnt + 1) / 2;
     var i: i64 = 0;
@@ -655,33 +650,33 @@ fn op_bins_ext(op2: i64) {
     // a field from the string at DS:SI into AX.
     decode_modrm();
     let is_bins: bool = op2 == 0x31 || op2 == 0x39;
-    let offv: i64 = read_rm(false);
-    let cnt: i64 = if op2 == 0x39 || op2 == 0x3B { (fetch8() as i64) + 1 } else { (get_r8(d_reg) as i64) + 1 };
+    let offv:    i64  = read_rm(false);
+    let cnt:     i64  = if op2 == 0x39 || op2 == 0x3B { (fetch8() as i64) + 1 } else { (get_r8(d_reg) as i64) + 1 };
     // The pointer is word-oriented: the offset register holds a bit position
     // within the current word (0-15); SI/DI advance by 2 per full word crossed.
     let adv: i64 = 2 * ((offv + cnt) >> 4);
     if is_bins {
-        let axv: i64 = r[0];
+        let axv:   i64 = r[0];
         let dbase: i64 = (seg[0] as i64) << 4;
-        let doff: i64 = r[7];
+        let doff:  i64 = r[7];
         var k: i64 = 0;
         while k < cnt {
             let pos: i64 = offv + k;
-            let a: i64 = (dbase + ((doff + (pos >> 3)) & 0xFFFF)) & 0xFFFFF;
-            let b: i64 = rd8(a);
-            let nb: i64 = if ((axv >> k) & 1) == 1 { b | (1 << (pos & 7)) } else { b & ~(1 << (pos & 7)) };
+            let a:   i64 = (dbase + ((doff + (pos >> 3)) & 0xFFFF)) & 0xFFFFF;
+            let b:   i64 = rd8(a);
+            let nb:  i64 = if ((axv >> k) & 1) == 1 { b | (1 << (pos & 7)) } else { b & ~(1 << (pos & 7)) };
             wb8(a, nb as! u8);
             k += 1;
         }
         r[7] = ((doff + adv) & 0xFFFF) as! u16;
     } else {
         let sbase: i64 = src_seg_base(3);
-        let soff: i64 = r[6];
+        let soff:  i64 = r[6];
         var res: i64 = 0;
-        var k: i64 = 0;
+        var k:   i64 = 0;
         while k < cnt {
             let pos: i64 = offv + k;
-            let b: i64 = rd8((sbase + ((soff + (pos >> 3)) & 0xFFFF)) & 0xFFFFF);
+            let b:   i64 = rd8((sbase + ((soff + (pos >> 3)) & 0xFFFF)) & 0xFFFFF);
             if ((b >> (pos & 7)) & 1) == 1 { res |= 1 << k; }
             k += 1;
         }
@@ -710,7 +705,7 @@ fn exec_one() -> bool {
     dbg_ip = ip;
     var op = fetch8();
     while op == 0x26 || op == 0x2E || op == 0x36 || op == 0x3E || op == 0xF0 || op == 0xF2 || op == 0xF3 || (cpu_v20 && !cpu_mz && (op == 0x64 || op == 0x65)) {
-        if op == 0xF0 { }
+        if op == 0xF0 {}
         else if op == 0xF2 { rep_prefix = 2; }
         else if op == 0xF3 { rep_prefix = 3; }
         else if op == 0x64 { rep_prefix = 4; }
@@ -739,7 +734,7 @@ fn exec_one() -> bool {
     if cpu_v20 && op == 0x0F {  // NEC extended instructions
         let op2 = fetch8();
         if op2 >= 0x10 && op2 <= 0x1F {  // TEST1/CLR1/SET1/NOT1: bit (idx mod size) of the operand
-            let which: i64 = (op2 >> 1) & 3;  // 0 TEST1, 1 CLR1, 2 SET1, 3 NOT1
+            let which:  i64  = (op2 >> 1) & 3; // 0 TEST1, 1 CLR1, 2 SET1, 3 NOT1
             let size16: bool = (op2 & 1) == 1;
             decode_modrm();
             let idx: i64 = if op2 >= 0x18 { fetch8() } else { get_r8(1) };
@@ -814,7 +809,7 @@ fn exec_one() -> bool {
         if d_reg == 7 && cpu_mz { return true; }  // V30MZ: FF /7 is a NOP, not a PUSH (WSCpuTest)
         if d_reg == 6 || d_reg == 7 { r[4] = r[4] - 2; let v = read_rm(true); seg_wr16((seg[2] as i64) << 4, r[4], v as! u16); return true; }  // PUSH Ev (/7 aliases /6 except on the MZ; SP decremented before the operand is read)
         return false; }
-    
+
     if op == 0x86 { decode_modrm(); let t = read_rm(false); write_rm(false, get_r8(d_reg)); set_r8(d_reg, t as! u8); return true; }  // XCHG Eb,Gb
     if op == 0x87 { decode_modrm(); let t = read_rm(true); write_rm(true, r[d_reg]); r[d_reg] = t as! u16; return true; }  // XCHG Ev,Gv
     if op == 0x90 { return true; }  // NOP (XCHG AX,AX)

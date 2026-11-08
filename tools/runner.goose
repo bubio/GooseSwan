@@ -13,14 +13,14 @@ fn run_ws(path: u8[:]) {
     guard read_file(path, rom) else { print("cannot read ", path); exit(1); }
     ws_boot();
     print("rom loaded: ", rom.len, " bytes");
-    var screen: u8[1024] = [0; 1024];
-    var last: u8[1024] = [0; 1024];
-    var lastn: i64 = 0;
-    var frozen: i64 = 0;
-    var menu_idx: i64 = 0;
+    var screen:   u8[1024] = [0; 1024];
+    var last:     u8[1024] = [0; 1024];
+    var lastn:    i64      = 0;
+    var frozen:   i64      = 0;
+    var menu_idx: i64      = 0;
     let argv2 = args();
-    var survey: bool = false;
-    var page_target: i64 = 0;
+    var survey:      bool = false;
+    var page_target: i64  = 0;
     if argv2.len > 3 {
         let a3 = argv2[3];
         if a3.len > 0 && a3[a3.len - 1] == 43 { survey = true; }
@@ -34,21 +34,21 @@ fn run_ws(path: u8[:]) {
         else if a3.len == 2 && a3[0] == 109 { menu_idx = (a3[1] as i64) - 48; }  // "m1".."m9": generic menu index (WSHWTest)
         else if a3.len >= 3 && a3[0] == 112 && a3[1] == 103 { page_target = (a3[2] as i64) - 48; if a3.len >= 4 { page_target = page_target * 10 + ((a3[3] as i64) - 48); } }  // "pgN": WSTimingTest page index
     }
-    var skips: i64 = 0;
-    var skip_hold: i64 = 0;
-    var frame: i64 = 0;
-    var done: bool = false;
-    var dismiss: i64 = 0;
+    var skips:     i64  = 0;
+    var skip_hold: i64  = 0;
+    var frame:     i64  = 0;
+    var done:      bool = false;
+    var dismiss:   i64  = 0;
     // Menu-driven ROMs: remember the menu as it stands just before the A press;
     // once a test has run, coming back to that exact screen ends the run
     // (otherwise auto-dismiss would restart Test All forever).
-    var menu: u8[1024] = [0; 1024];
-    var menun: i64 = 0;
-    var left_menu: bool = false;
-    var prev_fail: bool = false;
-    var page_done: i64 = 0;
-    var page_hold: i64 = 0;
-    var fb_dump: bool = false;
+    var menu:      u8[1024] = [0; 1024];
+    var menun:     i64      = 0;
+    var left_menu: bool     = false;
+    var prev_fail: bool     = false;
+    var page_done: i64      = 0;
+    var page_hold: i64      = 0;
+    var fb_dump:   bool     = false;
     if argv2.len > 4 && (argv2[4] == "fb" || argv2[4] == "fbwav") { fb_dump = true; }
     var wav_dump: bool = false;
     if argv2.len > 4 && (argv2[4] == "wav" || argv2[4] == "fbwav") { wav_dump = true; aud_enabled = true; }
@@ -72,7 +72,7 @@ fn run_ws(path: u8[:]) {
         // Report every screen that shows "Failed" (the periodic dumps
         // below only sample one frame in 2000).
         var has_fail: bool = false;
-        var fi: i64 = 0;
+        var fi:       i64  = 0;
         while fi + 5 < n { if screen[fi] == 70 && screen[fi + 1] == 97 && screen[fi + 2] == 105 && screen[fi + 3] == 108 && screen[fi + 4] == 101 && screen[fi + 5] == 100 { has_fail = true; } fi += 1; }
         if has_fail && !prev_fail { print("failed screen at frame ", frame, ":"); write_stdout(screen[..n]); }
         prev_fail = has_fail;
@@ -100,7 +100,7 @@ fn run_ws(path: u8[:]) {
 
 fn ws_screen_text(buf: u8[:]) -> i64 {
     let mapbase: i64 = ((io_ports[0x07] as i64) & 0x0F) << 11;
-    let top: i64 = ((io_ports[0x11] as i64) >> 3) & 31;
+    let top:     i64 = ((io_ports[0x11] as i64) >> 3) & 31;
     var n: i64 = 0;
     for y in 18 {
         let row: i64 = (top + y) & 31;
@@ -116,7 +116,7 @@ fn ws_screen_text(buf: u8[:]) -> i64 {
 
 fn count_ok(buf: u8[:], n: i64) -> i64 {
     var cnt: i64 = 0;
-    var i: i64 = 0;
+    var i:   i64 = 0;
     while i + 1 < n {
         if buf[i] == 79 && buf[i + 1] == 107 { cnt += 1; }  // "Ok"
         i += 1;
@@ -142,7 +142,6 @@ fn fb_write_ppm() {
     }
     write_file("framebuffer.ppm", ppm);
 }
-
 
 fn wav_write() {
     var w: u8[>..] = [];
@@ -193,8 +192,8 @@ fn run_mark(path: u8[:], spec: u8[:]) {
     let n: i64 = pos.len / 2;
     var got: i64[>..] = [];
     for k in n { got.push(0); }
-    var frame: i64 = 0;
-    var all: bool = false;
+    var frame: i64  = 0;
+    var all:   bool = false;
     while frame < 120 && !all {
         keys_state = 0;
         ws_frame();
@@ -237,7 +236,7 @@ fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
     ws_boot();
     aud_enabled = true;
     var sf: i64[>..] = []; var sb: i64[>..] = [];
-    var i: i64 = 0;
+    var i:  i64      = 0;
     while i < script.len && script[0] != 45 {
         var f: i64 = 0; var b: i64 = 0;
         while i < script.len && script[i] != 58 { f = f * 10 + ((script[i] as i64) - 48); i += 1; }
@@ -247,8 +246,8 @@ fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
         sf.push(f); sb.push(b);
     }
     var hashes: u8[>..] = [];
-    var pcm: u8[>..] = [];
-    var keys: i64 = 0;
+    var pcm:    u8[>..] = [];
+    var keys:   i64     = 0;
     for fr in frames {
         for k in sf.len { if sf[k] == fr { keys = sb[k]; } }
         keys_state = keys;

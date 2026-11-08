@@ -18,36 +18,36 @@ import ppu;
 import rtc;
 import apu;
 
-let SCREEN_W: i64 = 224;
-let SCREEN_H: i64 = 144;
-let AUDIO_RATE: i64 = 24000;           // stereo, interleaved L/R
+let SCREEN_W:     i64 = 224;
+let SCREEN_H:     i64 = 144;
+let AUDIO_RATE:   i64 = 24000;         // stereo, interleaved L/R
 let FRAME_CYCLES: i64 = 40704;         // 159 lines x 256 cycles
-let CPU_HZ: i64 = 3072000;
+let CPU_HZ:       i64 = 3072000;
 
 // Pad bits for run_frame's `keys`.
-let KEY_Y1: i64 = 1 << 0;
-let KEY_Y2: i64 = 1 << 1;
-let KEY_Y3: i64 = 1 << 2;
-let KEY_Y4: i64 = 1 << 3;
-let KEY_X1: i64 = 1 << 4;
-let KEY_X2: i64 = 1 << 5;
-let KEY_X3: i64 = 1 << 6;
-let KEY_X4: i64 = 1 << 7;
+let KEY_Y1:    i64 = 1 << 0;
+let KEY_Y2:    i64 = 1 << 1;
+let KEY_Y3:    i64 = 1 << 2;
+let KEY_Y4:    i64 = 1 << 3;
+let KEY_X1:    i64 = 1 << 4;
+let KEY_X2:    i64 = 1 << 5;
+let KEY_X3:    i64 = 1 << 6;
+let KEY_X4:    i64 = 1 << 7;
 let KEY_START: i64 = 1 << 9;
-let KEY_A: i64 = 1 << 10;
-let KEY_B: i64 = 1 << 11;
+let KEY_A:     i64 = 1 << 10;
+let KEY_B:     i64 = 1 << 11;
 
 // Save media, for save_size / save_read / save_load.
-let SAVE_SRAM: i64 = 0;
-let SAVE_CART_EEPROM: i64 = 1;
+let SAVE_SRAM:            i64 = 0;
+let SAVE_CART_EEPROM:     i64 = 1;
 let SAVE_INTERNAL_EEPROM: i64 = 2;
-let SAVE_RTC: i64 = 3;                  // the cartridge clock's 10 registers
-let SAVE_KINDS: i64 = 4;
+let SAVE_RTC:             i64 = 3;      // the cartridge clock's 10 registers
+let SAVE_KINDS:           i64 = 4;
 
 // Hardware model for the next power_on: MODEL_AUTO follows the cartridge
 // footer's colour flag (mono carts run on a mono WonderSwan).
-let MODEL_AUTO: i64 = -1;
-let MODEL_MONO: i64 = 0;
+let MODEL_AUTO:  i64 = -1;
+let MODEL_MONO:  i64 = 0;
 let MODEL_COLOR: i64 = 1;
 fn set_model(m: i64) { model_forced = m; }
 fn is_mono() -> bool { model_mono }

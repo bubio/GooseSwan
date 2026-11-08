@@ -36,16 +36,16 @@ fn sync_rtc_to_host() {
     if !core::has_rtc() { return; }
     let secs: i64 = time_ns() / 1000000000;
     let days: i64 = secs / 86400;
-    let rem: i64 = secs % 86400;
+    let rem:  i64 = secs % 86400;
     // civil_from_days (Howard Hinnant)
-    let z: i64 = days + 719468;
+    let z:   i64 = days + 719468;
     let era: i64 = z / 146097;
     let doe: i64 = z - era * 146097;
     let yoe: i64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let doy: i64 = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp: i64 = (5 * doy + 2) / 153;
-    let d: i64 = doy - (153 * mp + 2) / 5 + 1;
-    let m: i64 = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y: i64 = yoe + era * 400 + (if m <= 2 { 1 } else { 0 });
+    let mp:  i64 = (5 * doy + 2) / 153;
+    let d:   i64 = doy - (153 * mp + 2) / 5 + 1;
+    let m:   i64 = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y:   i64 = yoe + era * 400 + (if m <= 2 { 1 } else { 0 });
     core::set_rtc_datetime(y, m, d, (days + 4) % 7, rem / 3600, (rem / 60) % 60, rem % 60);
 }
