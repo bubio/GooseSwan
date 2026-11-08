@@ -276,7 +276,9 @@ fn ws_deliver_int() -> bool {
     if (flags & 0x0200) == 0 { return false; }
     var bit: i64 = 7;
     while bit > 0 && ((pending >> bit) & 1) == 0 { bit -= 1; }
-    do_int(((io_ports[0xB0] as i64) & 0xF8) + bit);
+    let ret: i64 = if irq_ret_override >= 0 { irq_ret_override } else { ip as i64 };
+    irq_ret_override = -1;
+    do_int_at(((io_ports[0xB0] as i64) & 0xF8) + bit, ret);
     return true;
 }
 
@@ -299,6 +301,7 @@ fn ws_boot() {
     for i in 256 { io_ports[i] = 0; }
     bk_ram = 0xFF; bk_rom0 = 0xFF; bk_rom1 = 0xFF; bk_linear = 0;
     int_cause = 0; key_select = 0; keys_state = 0; cpu_halted = false; sys_ctrl1 = 0x02;
+    irq_inhibit = 0; trap_inhibit = 0; irq_ret_override = -1;
     ws_cycles = 0; last_line = 0; lfsr = 0; noise_acc = 0; last_tick = 0; init_cyc(); init_io_masks();
     for i in 8 { r[i] = 0; }
     for i in 4 { seg[i] = 0; }
@@ -313,16 +316,23 @@ fn ws_frame() {
     ws_prev_keys = keys_state;
     var spent: i64 = 0;
     while spent < 40704 {
-        if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
-        if (flags & 0x0100) != 0 && dbg_op != 0x9D && dbg_op != 0xCF { do_int(1); ws_cycles += 33; spent += 33; }  // TF single-step trap (entry charge fitted from WSTimingTest's trap case)
+        // Swanium's order: IRQ acceptance (unless held off by the previous
+        // instruction), one instruction, then the TF trap for it.
+        let inhibited: bool = irq_inhibit > 0;
+        if inhibited { irq_inhibit -= 1; }
+        if inhibited { if (int_cause & (io_ports[0xB2] as i64)) != 0 { cpu_halted = false; } }
+        else if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
         if !cpu_halted {
             let pre_cx: i64 = r[1] as i64;
-            fault_chg = 0; cyc_in_exec = true;
+            fault_chg = 0; cyc_in_exec = true; irq_ret_override = -1;
             let okc: bool = exec_one(); cyc_in_exec = false;
             if !okc { ws_unsupported = true; return; }
             ws_total += 1;
             let c: i64 = est_cycles(pre_cx);
             ws_cycles += c; spent += c;
+            if c >= 256 && rep_prefix != 0 && ((dbg_op >= 0xA4 && dbg_op <= 0xAF) || (dbg_op >= 0x6C && dbg_op <= 0x6F)) { irq_ret_override = dbg_ip; }
+            if trap_inhibit > 0 { trap_inhibit -= 1; }
+            else if (flags & 0x0100) != 0 { do_int(1); ws_cycles += 33; spent += 33; }  // TF single-step trap (entry charge fitted from WSTimingTest's trap case)
         } else { ws_cycles += 32; spent += 32; }
         ws_line_events();
     }

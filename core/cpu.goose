@@ -352,11 +352,23 @@ fn cond(c: i64) -> bool {
 fn disp8s() -> i64 { let b = fetch8(); let bi: i64 = b; if bi > 127 { bi - 256 } else { bi } }
 fn disp16s() -> i64 { let v = fetch16(); let vi: i64 = v; if vi > 32767 { vi - 65536 } else { vi } }
 fn rel_jump(d: i64) { ip = (((ip as i64) + d) & 0xFFFF) as! u16; dbg_head = ip as i64; dbg_odd = ((ip as i64) & 1) != 0; dbg_disp = d; }
-fn do_int(n: i64) {
+// Interrupt acceptance (after Swanium's cpu): an instruction that
+// sets IF (STI, POPF/IRET turning IF on) or loads SS (POP SS, MOV SS)
+// holds maskable IRQs off for one more instruction; POPF/IRET turning
+// TF on likewise defer the first trap by one instruction. An IRQ that
+// lands right after a long REP string instruction (>= 256 cycles)
+// returns to that instruction's first prefix byte, as hardware
+// restarts it (ws-test-suite prefixes: REP:ESx8:MOVSB(IRQ)).
+var irq_inhibit: i64 = 0;
+var trap_inhibit: i64 = 0;
+var irq_ret_override: i64 = -1;
+
+fn do_int(n: i64) { do_int_at(n, ip as i64); }
+fn do_int_at(n: i64, ret_ip: i64) {
     if cyc_in_exec && dbg_op != 0xCC && dbg_op != 0xCD { fault_chg = 44; fault_base = cyc_fault_base(); }  // fault/interrupt-entry charge for the cycle estimator (INT opcodes carry theirs in cyc_tab)
     push16(flags as i64);
     push16(seg[1] as i64);
-    push16(ip as i64);
+    push16(ret_ip);
     flags = flags & 0xFCFF;  // clear TF and IF after pushing the original flags
     ip = seg_rd16(0, n * 4);
     seg[1] = seg_rd16(0, n * 4 + 2);
@@ -485,6 +497,10 @@ fn set_cf_of(cf: i64, of: i64) {
     if cf == 1 { f |= 1; }
     if of == 1 { f |= 0x0800; }
     flags = f as! u16;
+}
+fn flag_inhibits(old: i64) {
+    if (old & 0x0200) == 0 && (flags & 0x0200) != 0 { irq_inhibit = 1; }
+    if (old & 0x0100) == 0 && (flags & 0x0100) != 0 { trap_inhibit = 1; }
 }
 fn load_flags(v: i64) { flags = (((v & 0x0FD5) | 0xF002) as! u16); }  // bits 12-15 read as 1, bit 1 as 1, bits 3/5 as 0
 fn src_seg_base(def: i64) -> i64 { let s: i64 = if seg_override >= 0 { seg_override } else { def }; (seg[s] as i64) << 4 }
@@ -784,7 +800,7 @@ fn exec_one() -> bool {
     if op >= 0x50 && op <= 0x57 { r[4] = r[4] - 2; seg_wr16((seg[2] as i64) << 4, r[4] as i64, r[op - 0x50]); return true; }  // PUSH r16 (reg read after decrement: 8086 PUSH SP pushes the new SP)
     if op >= 0x58 && op <= 0x5F { let v = pop16(); r[op - 0x58] = v as! u16; return true; }  // POP r16
     if op == 0x06 || op == 0x0E || op == 0x16 || op == 0x1E { push16(seg[(op >> 3) & 3] as i64); return true; }  // PUSH seg
-    if op == 0x07 || op == 0x0F || op == 0x17 || op == 0x1F { let v = pop16(); seg[(op >> 3) & 3] = v as! u16; return true; }  // POP seg (0F = POP CS, 8086 only)
+    if op == 0x07 || op == 0x0F || op == 0x17 || op == 0x1F { let v = pop16(); seg[(op >> 3) & 3] = v as! u16; if op == 0x17 { irq_inhibit = 1; } return true; }  // POP seg (0F = POP CS, 8086 only)
     if op == 0x8F { decode_modrm(); let v = pop16(); write_rm(true, v); return true; }  // POP Ev
     if (op >= 0xA4 && op <= 0xAF && op != 0xA8 && op != 0xA9) || (cpu_v20 && op >= 0x6C && op <= 0x6F) {  // string operations
         let is_cmp: bool = op == 0xA6 || op == 0xA7 || op == 0xAE || op == 0xAF;
@@ -807,11 +823,11 @@ fn exec_one() -> bool {
     if op == 0x8D { decode_modrm(); r[d_reg] = d_off as! u16; return true; }  // LEA (mod=3: d_off holds the MZ adder value)
     if op == 0xC4 { decode_modrm(); if d_isreg && !cpu_mz { return false; } let lo = seg_rd16(d_segbase, d_off); let hi = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); r[d_reg] = lo; seg[0] = hi; return true; }  // LES (mod=3 on the MZ reads at the adder EA)
     if op == 0xC5 { decode_modrm(); if d_isreg && !cpu_mz { return false; } let lo = seg_rd16(d_segbase, d_off); let hi = seg_rd16(d_segbase, (d_off + 2) & 0xFFFF); r[d_reg] = lo; seg[3] = hi; return true; }  // LDS (mod=3 on the MZ reads at the adder EA)
-    if op == 0xCF { ip = pop16() as! u16; seg[1] = pop16() as! u16; load_flags(pop16()); return true; }  // IRET
+    if op == 0xCF { ip = pop16() as! u16; seg[1] = pop16() as! u16; let f0: i64 = flags as i64; load_flags(pop16()); flag_inhibits(f0); return true; }  // IRET
     if op == 0x98 { if (r[0] & 0x80) != 0 { r[0] = (r[0] & 0xFF) | 0xFF00; } else { r[0] = r[0] & 0xFF; } return true; }  // CBW
     if op == 0x99 { r[2] = if (r[0] & 0x8000) != 0 { 0xFFFF } else { 0 }; return true; }  // CWD
     if op == 0x9C { push16(flags as i64); return true; }  // PUSHF
-    if op == 0x9D { load_flags(pop16()); return true; }  // POPF
+    if op == 0x9D { let f0: i64 = flags as i64; load_flags(pop16()); flag_inhibits(f0); return true; }  // POPF
     if op == 0x9E { flags = (((flags as i64) & 0xFF00) | ((flags as i64) & 0x2A) | ((get_r8(4) as i64) & 0xD5)) as! u16; return true; }  // SAHF
     if op == 0x9F { set_r8(4, (flags & 0xFF) as! u8); return true; }  // LAHF
     if op == 0xA0 { let off = fetch16(); set_r8(0, rd8((src_seg_base(3) + (off as i64)) & 0xFFFFF)); return true; }  // MOV AL,moffs8
@@ -838,7 +854,7 @@ fn exec_one() -> bool {
     if op == 0xF8 { flags = flags & 0xFFFE; return true; }  // CLC
     if op == 0xF9 { flags = flags | 1; return true; }  // STC
     if op == 0xFA { flags = flags & 0xFDFF; return true; }  // CLI
-    if op == 0xFB { flags = flags | 0x0200; return true; }  // STI
+    if op == 0xFB { if (flags & 0x0200) == 0 { irq_inhibit = 1; } flags = flags | 0x0200; return true; }  // STI
     if op == 0xFC { flags = flags & 0xFBFF; return true; }  // CLD
     if op == 0xFD { flags = flags | 0x0400; return true; }  // STD
     if op == 0x27 { let oa: i64 = get_r8(0); var adj: i64 = 0; var af: i64 = 0; if ((oa & 0xF) > 9) || ((flags >> 4) & 1) == 1 { adj += 6; af = 1; } var cf: i64 = 0; if (cpu_mz && (oa > 0x99 || (flags & 1) == 1)) || (!cpu_mz && (oa >= 0xA0 || (flags & 1) == 1 || (oa > 0x99 && ((flags >> 4) & 1) == 0))) { adj += 0x60; cf = 1; } let res: i64 = (oa + adj) & 0xFF; set_r8(0, res as! u8); var nf: i64 = (flags as i64) & 0xF72A; if cf == 1 { nf |= 1; } if af == 1 { nf |= 0x10; } if ((oa ^ res) & (adj ^ res) & 0x80) != 0 { nf |= 0x0800; } flags = nf as! u16; set_szp(res, 8); return true; }  // DAA
@@ -866,7 +882,7 @@ fn exec_one() -> bool {
         if d_reg == 7 { let b = read_rm(true); let dvd: i64 = s32(((r[2] as i64) << 16) | (r[0] as i64)); if cpu_mz { if b == 0 && (r[2] as i64) == 0x8000 && (r[0] as i64) == 0 { r[0] = 0x8001; r[2] = 0; mz_div_flags(0, 1); return true; } var fault: bool = b == 0; var q: i64 = 0; var rem: i64 = 0; if !fault { let qq, rr = trunc_divmod(dvd, s16(b)); q = qq; rem = rr; fault = q > 32767 || q < (0 - 32767); } if fault { mz_div_flags(0, 0); do_int(0); } else { r[0] = (q & 0xFFFF) as! u16; r[2] = (rem & 0xFFFF) as! u16; mz_div_flags(0, if rem == 0 && (q & 1) == 1 { 1 } else { 0 }); } return true; } if b == 0 { do_int(0); } else { let q, rem = trunc_divmod(dvd, s16(b)); if q > 32767 || q < (0 - 32768) { do_int(0); } else { r[0] = (q & 0xFFFF) as! u16; r[2] = (rem & 0xFFFF) as! u16; } } return true; }
         return false; }
     if op == 0x8C { decode_modrm(); write_rm(true, seg[d_reg & 3] as i64); return true; }  // MOV Ev,seg
-    if op == 0x8E { decode_modrm(); let v = read_rm(true); seg[d_reg & 3] = v as! u16; return true; }  // MOV seg,Ev
+    if op == 0x8E { decode_modrm(); let v = read_rm(true); seg[d_reg & 3] = v as! u16; if (d_reg & 3) == 2 { irq_inhibit = 1; } return true; }  // MOV seg,Ev
     if op >= 0x70 && op <= 0x7F { let d = disp8s(); if cond(op & 0xF) { dbg_taken = true; dbg_back = d < 0; rel_jump(d); } return true; }  // Jcc rel8
     if op == 0xEB { rel_jump(disp8s()); return true; }  // JMP rel8
     if op == 0xE9 { rel_jump(disp16s()); return true; }  // JMP rel16
