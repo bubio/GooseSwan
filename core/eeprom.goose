@@ -71,10 +71,10 @@ fn ie_status_read() -> i64 {
 }
 
 fn ie_control(v: i64) {
-    let comm: i64 = io_ports[0xBC] | ((io_ports[0xBD] as i64) << 8);
+    let comm: i64 = io_ports[IEEP_CMD] | ((io_ports[IEEP_CMD + 1] as i64) << 8);
     if v == 0x10 { ee_execute(1, comm, ie_bits(comm)); ie_done = false; ie_delay = 1; }
     else if v == 0x20 {
-        ee_input[1] = io_ports[0xBA] | ((io_ports[0xBB] as i64) << 8);
+        ee_input[1] = io_ports[IEEP_DATA] | ((io_ports[IEEP_DATA + 1] as i64) << 8);
         let baddr: i64 = (comm & ((1 << ie_bits(comm)) - 1)) * 2;
         if baddr >= 0x60 { ie_fault = true; ie_done = true; ie_delay = 0; }
         else { ee_execute(1, comm, ie_bits(comm)); ie_done = false; ie_delay = 0; }
@@ -85,13 +85,13 @@ fn ie_control(v: i64) {
 
 fn ce_control(v: i64) {
     let op:   i64 = v >> 4;
-    let data: i64 = io_ports[0xC4] | ((io_ports[0xC5] as i64) << 8);
-    let comm: i64 = io_ports[0xC6] | ((io_ports[0xC7] as i64) << 8);
+    let data: i64 = io_ports[CEEP_DATA] | ((io_ports[CEEP_DATA + 1] as i64) << 8);
+    let comm: i64 = io_ports[CEEP_CMD] | ((io_ports[CEEP_CMD + 1] as i64) << 8);
     var new_data: i64 = data;
     if op == 1 { ee_execute(0, comm, ee_bits[0]); new_data = ee_output[0]; }
     else if op == 2 { ee_input[0] = data; ee_execute(0, comm, ee_bits[0]); }
     else if op == 4 { ee_execute(0, comm, ee_bits[0]); }
-    io_ports[0xC4] = (new_data & 0xFF) as! u8; io_ports[0xC5] = ((new_data >> 8) & 0xFF) as! u8;
+    io_ports[CEEP_DATA] = (new_data & 0xFF) as! u8; io_ports[CEEP_DATA + 1] = ((new_data >> 8) & 0xFF) as! u8;
     var done: i64 = 0; if op == 1 || op == 8 { done = 1; }
-    io_ports[0xC8] = ((v & 0xF0) | 0x02 | done) as! u8;
+    io_ports[CEEP_CTRL] = ((v & 0xF0) | 0x02 | done) as! u8;
 }

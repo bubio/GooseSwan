@@ -11,6 +11,7 @@
 namespace core;
 
 import std;
+import ports;
 import cpu;
 import bus;
 import eeprom;
