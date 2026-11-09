@@ -227,6 +227,7 @@ var trace_frames: i64 = 0;  // sst run: print the CPU state at the end of the la
 fn run_diff(path: u8[:], frames: i64, out: u8[:], script: u8[:], model: u8[:]) {
     var tv: u8[>..] = [];
     if env("GW_TRACE", tv) { for k in tv.len { trace_frames = trace_frames * 10 + ((tv[k] as i64) - 48); } }
+    dbg_ring_on = trace_frames > 0;
     var wv: u8[>..] = [];
     var pv: u8[>..] = [];
     if env("GW_PWATCH", pv) { dbg_pwatch = 0; for k in pv.len { dbg_pwatch = dbg_pwatch * 10 + ((pv[k] as i64) - 48); } }
