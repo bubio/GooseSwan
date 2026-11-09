@@ -11,7 +11,7 @@ SST=./tools/sst
 # Windows' C runtime ends printed lines with \r\n; strip the \r so the
 # parsing below is the same on every platform. Keeps sst's exit status.
 sst() { _out=$("$SST" "$@") || return; printf '%s\n' "$_out" | tr -d '\r'; }
-for t in ppu_test apu_test eeprom_test; do
+for t in cpu_test ppu_test apu_test eeprom_test; do
     out=$(sst $t)
     echo "$out"
     echo "$out" | grep -q ", 0 failed" || { echo "FAIL: $t" >&2; exit 1; }
@@ -19,8 +19,10 @@ done
 total=$(sst tests/data/*.json | awk -F'[= ]' '/total=/{t+=$3; p+=$5} END {print p"/"t}')
 echo "8086 corpus: $total"
 [ "$total" = "634406/646000" ] || { echo "FAIL: corpus baseline moved ($total)" >&2; exit 1; }
-sst ws tests/roms/WSHWTest.wsc m1 > /tmp/testall.txt 2>&1
-if grep -qi failed /tmp/testall.txt; then echo "FAIL: WSHWTest Test All" >&2; exit 1; fi
+testall=$(mktemp)
+trap 'rm -f "$testall"' EXIT
+sst ws tests/roms/WSHWTest.wsc m1 > "$testall" 2>&1
+if grep -qi failed "$testall"; then echo "FAIL: WSHWTest Test All" >&2; exit 1; fi
 echo "WSHWTest Test All: pass"
 sh ./tests/fb_check.sh
 pass=0

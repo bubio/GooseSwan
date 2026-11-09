@@ -45,7 +45,7 @@ Escape closes. Vertical games (cartridge footer flag) are detected
 automatically: the picture is turned 90° counter-clockwise in a
 portrait window and both pads' directions turn with it, as in
 Swanium. Save data lands next to the ROM (`<rom>.sav`,
-`<rom>.eep`, `<rom>.iep`). `./app/gooswan <rom> <frames> check`
+`<rom>.eep`, `<rom>.iep`, and `<rom>.rtc` for carts with a clock). `./app/gooswan <rom> <frames> check`
 runs a fixed number of frames and verifies the presented picture
 against the emulated framebuffer (headless-friendly).
 

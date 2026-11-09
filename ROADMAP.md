@@ -58,8 +58,9 @@ and the next step recorded in the session notes.
   and Test Windows screens rendering correctly. Sprites have since
   landed too (attribute table, SCR2 priority, sprite window,
   32-per-line limit; `ppu_test` 39/39), and `tests/fb_check.sh`
-  guards three golden screen hashes. Remaining PPU gaps: LCD
-  icons/off state and per-frame sprite latching.
+  guards three golden screen hashes. Sprite attributes have since
+  been latched per frame as in Swanium. Remaining PPU gaps: LCD
+  icons/off state.
 
 ## M4 — Peripherals (in progress)
 - APU, timers, interrupts, DMA.

@@ -4,10 +4,10 @@ namespace core;
 
 var fb: u16[32256] = [0; 32256];
 
-fn ppu_color_mode() -> bool { return !model_mono && ((io_ports[0x60] as i64) & 0x80) != 0; }  // a mono WonderSwan ignores the colour-mode bit (Swanium color_rendering_enabled)
+fn ppu_color_mode() -> bool { return !model_mono && ((io_ports[VIDEO_MODE] as i64) & 0x80) != 0; }  // a mono WonderSwan ignores the colour-mode bit (Swanium color_rendering_enabled)
 
 fn ppu_tile_pixel(tile: i64, tx: i64, ty: i64) -> i64 {
-    let vm: i64 = io_ports[0x60];
+    let vm: i64 = io_ports[VIDEO_MODE];
     if (vm & 0x80) != 0 && (vm & 0x40) != 0 {
         let base: i64 = 0x4000 + tile * 32 + ty * 4;
         if (vm & 0x20) != 0 {
@@ -28,7 +28,7 @@ fn ppu_tile_pixel(tile: i64, tx: i64, ty: i64) -> i64 {
 }
 
 fn ppu_shade(idx: i64) -> i64 {
-    let b: i64 = io_ports[0x1C + (idx >> 1)];
+    let b: i64 = io_ports[SHADE_POOL_BASE + (idx >> 1)];
     if (idx & 1) == 0 { return b & 15; }
     return (b >> 4) & 15;
 }
@@ -36,7 +36,7 @@ fn ppu_shade(idx: i64) -> i64 {
 fn ppu_grey(shade: i64) -> i64 { let n: i64 = 15 - (shade & 15); return (n << 8) | (n << 4) | n; }
 
 fn ppu_resolve_mono(pal: i64, pixel: i64) -> i64 {
-    let b: i64 = io_ports[0x20 + pal * 2 + (pixel >> 1)];
+    let b: i64 = io_ports[PALETTE_BASE + pal * 2 + (pixel >> 1)];
     var pool: i64 = (b >> 4) & 7;
     if (pixel & 1) == 0 { pool = b & 7; }
     return ppu_grey(ppu_shade(pool));
@@ -59,16 +59,16 @@ fn ppu_transparent(pal: i64, pixel: i64) -> bool {
 }
 
 fn ppu_backdrop() -> i64 {
-    let b: i64 = io_ports[0x01];
+    let b: i64 = io_ports[DISP_CTRL_HI];
     if ppu_color_mode() { return ppu_resolve_color(b >> 4, b & 15); }
     return ppu_grey(ppu_shade(b & 7));
 }
 
 fn ppu_bg_sample(layer: i64, x: i64, y: i64) -> i64, i64 {
-    var sx:  i64 = io_ports[0x10];
-    var sy:  i64 = io_ports[0x11];
-    var nib: i64 = (io_ports[0x07] as i64) & 0x0F;
-    if layer == 1 { sx = io_ports[0x12]; sy = io_ports[0x13]; nib = ((io_ports[0x07] as i64) >> 4) & 0x0F; }
+    var sx:  i64 = io_ports[SCR1_SCROLL_X];
+    var sy:  i64 = io_ports[SCR1_SCROLL_Y];
+    var nib: i64 = (io_ports[MAP_BASE] as i64) & 0x0F;
+    if layer == 1 { sx = io_ports[SCR2_SCROLL_X]; sy = io_ports[SCR2_SCROLL_Y]; nib = ((io_ports[MAP_BASE] as i64) >> 4) & 0x0F; }
     if !ppu_color_mode() { nib = nib & 7; }
     let base: i64 = nib << 11;
     let bgx:  i64 = (x + sx) & 0xFF;
@@ -86,9 +86,9 @@ fn ppu_bg_sample(layer: i64, x: i64, y: i64) -> i64, i64 {
 }
 
 fn ppu_scr2_visible(x: i64, y: i64) -> bool {
-    let dc: i64 = io_ports[0x00];
+    let dc: i64 = io_ports[DISP_CTRL];
     if (dc & 0x20) == 0 { return true; }
-    let inside: bool = x >= io_ports[0x08] && x <= io_ports[0x0A] && y >= io_ports[0x09] && y <= io_ports[0x0B];
+    let inside: bool = x >= io_ports[SCR2_WINDOW_X1] && x <= io_ports[SCR2_WINDOW_X2] && y >= io_ports[SCR2_WINDOW_Y1] && y <= io_ports[SCR2_WINDOW_Y2];
     if (dc & 0x10) != 0 { return !inside; }
     return inside;
 }
@@ -100,10 +100,6 @@ var spr_any_on:   bool[224] = [false; 224];
 var spr_front_c:  i64[224]  = [0; 224];
 var spr_front_on: bool[224] = [false; 224];
 
-// Fill the sprite line buffers for line y from the live attribute table
-// (Swanium latches the table per frame; sampling it per line is the
-// documented simplification here). At most 32 sprites per line count,
-// in table order starting at SPR_FIRST; X wraps at 256.
 // Sprite attributes are latched per frame, as Swanium does: the table is
 // captured just before line 142 renders and becomes active when the
 // frame ends, so mid-frame OAM writes show up on the next frame. Until
@@ -115,9 +111,9 @@ var spr_next_n:      i64      = 0;
 var spr_latch_valid: bool     = false;
 
 fn ppu_capture_sprites(into_next: bool) {
-    let base:  i64 = ((io_ports[0x04] as i64) & 0x3F) << 9;
-    let first: i64 = io_ports[0x05];
-    var count: i64 = io_ports[0x06]; if count > 128 { count = 128; }
+    let base:  i64 = ((io_ports[SPR_BASE] as i64) & 0x3F) << 9;
+    let first: i64 = io_ports[SPR_FIRST];
+    var count: i64 = io_ports[SPR_COUNT]; if count > 128 { count = 128; }
     for i in count {
         let ea: i64 = base + ((first + i) & 127) * 4;
         let w:  i64 = mem[ea] | ((mem[ea + 1] as i64) << 8);
@@ -132,11 +128,14 @@ fn ppu_promote_sprites() {
     spr_latch_valid = true;
 }
 
+// Fill the sprite line buffers for line y from the latched attribute
+// table. At most 32 sprites per line count, in table order starting at
+// SPR_FIRST; X wraps at 256.
 fn ppu_sprite_line(y: i64) {
     for i in 224 { spr_any_on[i] = false; spr_front_on[i] = false; }
     if !spr_latch_valid { ppu_capture_sprites(false); spr_latch_valid = true; }
     let count: i64 = spr_latch_n;
-    let dc:    i64 = io_ports[0x00];
+    let dc:    i64 = io_ports[DISP_CTRL];
     var used: i64 = 0;
     var n:    i64 = 0;
     while n < count && used < 32 {
@@ -156,7 +155,7 @@ fn ppu_sprite_line(y: i64) {
             var x: i64 = sx + dx; if x >= 256 { x -= 256; }
             if x >= 224 { continue; }
             if spr_any_on[x] && (!prio || spr_front_on[x]) { continue; }
-            if (dc & 8) != 0 && wattr && x >= io_ports[0x0C] && x <= io_ports[0x0E] && y >= io_ports[0x0D] && y <= io_ports[0x0F] { continue; }
+            if (dc & 8) != 0 && wattr && x >= io_ports[SPR_WINDOW_X1] && x <= io_ports[SPR_WINDOW_X2] && y >= io_ports[SPR_WINDOW_Y1] && y <= io_ports[SPR_WINDOW_Y2] { continue; }
             var tx: i64 = dx; if (w & 0x4000) != 0 { tx = 7 - tx; }
             let px: i64 = ppu_tile_pixel(tile, tx, ty);
             if ppu_transparent(pal, px) { continue; }
@@ -169,7 +168,7 @@ fn ppu_sprite_line(y: i64) {
 
 fn render_line(y: i64) {
     if y < 0 || y >= 144 { return; }
-    let dc:  i64 = io_ports[0x00];
+    let dc:  i64 = io_ports[DISP_CTRL];
     let bd:  i64 = ppu_backdrop();
     let row: i64 = y * 224;
     if (dc & 4) != 0 { ppu_sprite_line(y); }
