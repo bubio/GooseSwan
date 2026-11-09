@@ -408,7 +408,7 @@ fn do_int_at(n: i64, ret_ip: i64) {
     push16(flags);
     push16(seg[1]);
     push16(ret_ip);
-    flags = flags & 0xFCFF;  // clear TF and IF after pushing the original flags
+    flags = (flags & ~(F_TF | F_IF)) as! u16;  // clear TF and IF after pushing the original flags
     ip = seg_rd16(0, n * 4);
     seg[1] = seg_rd16(0, n * 4 + 2);
 }
@@ -956,7 +956,7 @@ fn exec_one() -> bool {
             // down further from this data.
             read_rm(size16);
             write_rm(size16, 0);
-            flags = ((flags & KEEP_NON_ARITH) | 0x0044) as! u16;
+            flags = ((flags & KEEP_NON_ARITH) | F_ZF | F_PF) as! u16;
             return true;
         }
         let kind2: i64 = if d_reg == 6 { 4 } else { d_reg }; let v = read_rm(size16); let res = shift_op(kind2, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shift by imm8
@@ -1039,8 +1039,8 @@ fn exec_one() -> bool {
     if op == 0xA1 { let off = fetch16(); r[0] = seg_rd16(src_seg_base(3), off); return true; }  // MOV AX,moffs16
     if op == 0xA2 { let off = fetch16(); wb8((src_seg_base(3) + off) & 0xFFFFF, get_r8(0)); return true; }  // MOV moffs8,AL
     if op == 0xA3 { let off = fetch16(); seg_wr16(src_seg_base(3), off, r[0]); return true; }  // MOV moffs16,AX
-    if op >= 0xD0 && op <= 0xD3 { decode_modrm(); if d_reg == 6 && !cpu_v20 { if (op & 2) == 2 && get_r8(1) == 0 { return true; } let sm: bool = (op & 1) == 1; write_rm(sm, if sm { 0xFFFF } else { 0xFF }); flags = ((flags & KEEP_NON_ARITH) | 0x0084) as! u16; return true; } let size16: bool = (op & 1) == 1; let cnt: i64 = if (op & 2) == 0 { 1 } else { get_r8(1) }; let v = read_rm(size16); let res = shift_op(if d_reg == 6 { 4 } else { d_reg }, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shifts/rotates; /6 = SETMO (8086) or SAL (V20)
-    if op == 0xD4 { let base: i64 = fetch8(); if base == 0 { if cpu_mz { mz_div_flags(unit_cfof, if (get_r8(0) & 0xC0) == 0 { 1 } else { 0 }); } do_int(0); } else { let al: i64 = get_r8(0); let q: i64 = al / base; set_r8(4, q as! u8); set_r8(0, (al - q * base) as! u8); set_szp(al - q * base, 8); flags = flags & 0xF7EE; } return true; }  // AAM
+    if op >= 0xD0 && op <= 0xD3 { decode_modrm(); if d_reg == 6 && !cpu_v20 { if (op & 2) == 2 && get_r8(1) == 0 { return true; } let sm: bool = (op & 1) == 1; write_rm(sm, if sm { 0xFFFF } else { 0xFF }); flags = ((flags & KEEP_NON_ARITH) | F_SF | F_PF) as! u16; return true; } let size16: bool = (op & 1) == 1; let cnt: i64 = if (op & 2) == 0 { 1 } else { get_r8(1) }; let v = read_rm(size16); let res = shift_op(if d_reg == 6 { 4 } else { d_reg }, v, cnt, if size16 { 16 } else { 8 }); write_rm(size16, res); return true; }  // shifts/rotates; /6 = SETMO (8086) or SAL (V20)
+    if op == 0xD4 { let base: i64 = fetch8(); if base == 0 { if cpu_mz { mz_div_flags(unit_cfof, if (get_r8(0) & 0xC0) == 0 { 1 } else { 0 }); } do_int(0); } else { let al: i64 = get_r8(0); let q: i64 = al / base; set_r8(4, q as! u8); set_r8(0, (al - q * base) as! u8); set_szp(al - q * base, 8); flags = (flags & ~(F_OF | F_AF | F_CF)) as! u16; } return true; }  // AAM
     if op == 0xD5 { let base: i64 = fetch8(); let ub: i64 = if cpu_v20 && !cpu_mz { 10 } else { base }; let lo: i64 = ((get_r8(4)) * ub) & 0xFF; let v = alu_op(0, lo, get_r8(0), 8); set_r8(0, v as! u8); set_r8(4, 0); return true; }  // AAD
     if op == 0xD6 { if cpu_v20 && !cpu_mz { let off: i64 = ((r[3] as i64) + (get_r8(0))) & 0xFFFF; set_r8(0, rd8((src_seg_base(3) + off) & 0xFFFFF)); } else { set_r8(0, if (flags & 1) != 0 { 0xFF } else { 0 }); } return true; }  // SALC (8086 and V30MZ) / XLAT (V20)
     if op == 0xD7 { let off: i64 = ((r[3] as i64) + (get_r8(0))) & 0xFFFF; set_r8(0, rd8((src_seg_base(3) + off) & 0xFFFFF)); return true; }  // XLAT
@@ -1056,12 +1056,12 @@ fn exec_one() -> bool {
     if op == 0x9B { return true; }  // WAIT: no coprocessor attached, a NOP
     if op == 0xF4 && ws_mode { cpu_halted = true; return true; }  // HLT: the runner wakes the CPU on interrupts
     if op == 0xF5 { flags = flags ^ 1; return true; }  // CMC
-    if op == 0xF8 { flags = flags & 0xFFFE; return true; }  // CLC
+    if op == 0xF8 { flags = (flags & ~F_CF) as! u16; return true; }  // CLC
     if op == 0xF9 { flags = flags | 1; return true; }  // STC
-    if op == 0xFA { flags = flags & 0xFDFF; return true; }  // CLI
-    if op == 0xFB { if (flags & F_IF) == 0 { irq_inhibit = 1; } flags = flags | 0x0200; return true; }  // STI
-    if op == 0xFC { flags = flags & 0xFBFF; return true; }  // CLD
-    if op == 0xFD { flags = flags | 0x0400; return true; }  // STD
+    if op == 0xFA { flags = (flags & ~F_IF) as! u16; return true; }  // CLI
+    if op == 0xFB { if (flags & F_IF) == 0 { irq_inhibit = 1; } flags = (flags | F_IF) as! u16; return true; }  // STI
+    if op == 0xFC { flags = (flags & ~F_DF) as! u16; return true; }  // CLD
+    if op == 0xFD { flags = (flags | F_DF) as! u16; return true; }  // STD
     if op == 0x27 { op_daa_das(false); return true; }  // DAA
     if op == 0x2F { op_daa_das(true); return true; }  // DAS
     if op == 0x37 { op_aaa_aas(false); return true; }  // AAA

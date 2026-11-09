@@ -163,11 +163,16 @@ fn front_main() {
     if check {
         gfx::frame();
         let px = gfx::read_pixels(gfx::screen());
+        // The window is opened at 3x, but the drawable can be larger
+        // (HiDPI) or resized; the texture is stretched over all of it,
+        // so sample the centre of each source pixel's cell.
+        let ss = gfx::screen_size();
+        let ww: i64 = ss.x;
+        let wh: i64 = ss.y;
         var bad: i64 = 0;
-        let ww: i64 = tw * 3;
-        if px.len == ww * th * 3 * 4 {
+        if ww >= tw && wh >= th && px.len == ww * wh * 4 {
             for y in th { for x in tw {
-                let si: i64 = ((y * 3 + 1) * ww + (x * 3 + 1)) * 4;
+                let si: i64 = (((2 * y + 1) * wh / (2 * th)) * ww + (2 * x + 1) * ww / (2 * tw)) * 4;
                 let di: i64 = (y * tw + x) * 4;
                 if px[si] != rgba[di] || px[si + 1] != rgba[di + 1] || px[si + 2] != rgba[di + 2] { bad += 1; }
             } }

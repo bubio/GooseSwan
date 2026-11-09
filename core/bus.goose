@@ -368,6 +368,7 @@ var ws_frame_carry: i64  = 0;
 // Debug ring: CS:IP and first byte of the last 1024 instructions (cs << 24 | ip << 8 | byte).
 var dbg_ring:     i64[1024] = [0; 1024];
 var dbg_ring_pos: i64       = 0;
+var dbg_ring_on:  bool      = false;  // off in normal play: recording costs a memory read per instruction (sst run turns it on with GW_TRACE)
 
 fn ws_boot() {
     ws_mode = true;
@@ -419,7 +420,7 @@ fn ws_frame() {
         else if ws_deliver_int() { ws_cycles += 40; spent += 40; }  // hardware IRQ entry = 40 (fault entry is 44; the 4-cycle difference is what ExIrq measures)
         if !cpu_halted {
             let pre_cx: i64 = r[1];
-            dbg_ring[dbg_ring_pos] = ((seg[1] as i64) << 24) | ((ip as i64) << 8) | (rd8(phys(seg[1], ip))); dbg_ring_pos = (dbg_ring_pos + 1) & 1023;
+            if dbg_ring_on { dbg_ring[dbg_ring_pos] = ((seg[1] as i64) << 24) | ((ip as i64) << 8) | (rd8(phys(seg[1], ip))); dbg_ring_pos = (dbg_ring_pos + 1) & 1023; }
             fault_chg = 0; cyc_in_exec = true; irq_ret_override = -1;
             let okc: bool = exec_one(); cyc_in_exec = false;
             if !okc { ws_unsupported = true; return; }
